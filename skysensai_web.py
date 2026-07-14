@@ -61,79 +61,216 @@ def create_sample_adsb_file():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Built-in fake simulation scenarios
+# Built-in timeline simulation scenarios
 # ─────────────────────────────────────────────────────────────────────────────
 
 SIM_SCENARIOS = {
     "three_plane_pattern": {
         "name": "Three Aircraft Pattern Flow",
         "steps": [
-            {"callsign": "Cherokee 56T", "state": "downwind", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "forty_five_entry", "runway": "14"},
-            {"callsign": "Cherokee 56T", "state": "base", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "forty_five_entry", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "downwind", "runway": "14"},
-            {"callsign": "Cherokee 56T", "state": "final", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "downwind", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "base", "runway": "14"},
-            {"callsign": "Cherokee 56T", "state": "short_final", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "base", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "final", "runway": "14"},
-            {"callsign": "Cherokee 56T", "state": "landed_rollout", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "final", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "short_final", "runway": "14"},
-            {"callsign": "Cherokee 56T", "state": "entered_taxiway", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "short_final", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "landed_rollout", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "entered_taxiway", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "landed_rollout", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "entered_taxiway", "runway": "14"},
+            {
+                "message": "T+0: Three aircraft established around runway 14.",
+                "updates": [
+                    {"callsign": "Cherokee 56T", "state": "downwind", "runway": "14"},
+                    {"callsign": "Cessna 23A", "state": "forty_five_entry", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "holding_short", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+1: Lead aircraft turns base, second aircraft joins downwind.",
+                "updates": [
+                    {"callsign": "Cherokee 56T", "state": "base", "runway": "14"},
+                    {"callsign": "Cessna 23A", "state": "downwind", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "holding_short", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+2: Lead aircraft turns final, second aircraft continues downwind.",
+                "updates": [
+                    {"callsign": "Cherokee 56T", "state": "final", "runway": "14"},
+                    {"callsign": "Cessna 23A", "state": "downwind", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "holding_short", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+3: Lead aircraft short final, second aircraft turns base.",
+                "updates": [
+                    {"callsign": "Cherokee 56T", "state": "short_final", "runway": "14"},
+                    {"callsign": "Cessna 23A", "state": "base", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "holding_short", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+4: Lead aircraft lands, second aircraft holds base, departure waits.",
+                "updates": [
+                    {"callsign": "Cherokee 56T", "state": "landed_rollout", "runway": "14"},
+                    {"callsign": "Cessna 23A", "state": "base", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "holding_short", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+5: Lead aircraft clears runway, departure enters runway.",
+                "updates": [
+                    {"callsign": "Cherokee 56T", "state": "entered_taxiway", "runway": "14"},
+                    {"callsign": "Cessna 23A", "state": "base", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "entering_runway", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+6: Departure rolling, second aircraft remains on base.",
+                "updates": [
+                    {"callsign": "Cessna 23A", "state": "base", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "departing", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+7: Second aircraft turns final, departure climbs upwind.",
+                "updates": [
+                    {"callsign": "Cessna 23A", "state": "final", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "upwind", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+8: Second aircraft short final, departure turns crosswind.",
+                "updates": [
+                    {"callsign": "Cessna 23A", "state": "short_final", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "crosswind", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+9: Second aircraft lands, departure joins downwind.",
+                "updates": [
+                    {"callsign": "Cessna 23A", "state": "landed_rollout", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "downwind", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+10: Second aircraft clears runway, third aircraft turns base.",
+                "updates": [
+                    {"callsign": "Cessna 23A", "state": "entered_taxiway", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "base", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+11: Third aircraft turns final.",
+                "updates": [
+                    {"callsign": "Diamond 45X", "state": "final", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+12: Third aircraft short final.",
+                "updates": [
+                    {"callsign": "Diamond 45X", "state": "short_final", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+13: Third aircraft lands.",
+                "updates": [
+                    {"callsign": "Diamond 45X", "state": "landed_rollout", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+14: Third aircraft clears runway.",
+                "updates": [
+                    {"callsign": "Diamond 45X", "state": "entered_taxiway", "runway": "14"},
+                ]
+            },
         ]
     },
 
     "three_plane_conflict": {
         "name": "Three Aircraft With Spacing Conflict",
         "steps": [
-            {"callsign": "Cherokee 56T", "state": "downwind", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "forty_five_entry", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "forty_five_entry", "runway": "14"},
-            {"callsign": "Cherokee 56T", "state": "base", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "downwind", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "downwind", "runway": "14"},
-            {"callsign": "Cherokee 56T", "state": "final", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "base", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "base", "runway": "14"},
-            {"callsign": "Cherokee 56T", "state": "short_final", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "final", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "final", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "short_final", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "short_final", "runway": "14"},
+            {
+                "message": "T+0: Two aircraft approach the same entry area.",
+                "updates": [
+                    {"callsign": "Cherokee 56T", "state": "downwind", "runway": "14"},
+                    {"callsign": "Cessna 23A", "state": "forty_five_entry", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "forty_five_entry", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+1: Two aircraft are now on downwind.",
+                "updates": [
+                    {"callsign": "Cherokee 56T", "state": "base", "runway": "14"},
+                    {"callsign": "Cessna 23A", "state": "downwind", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "downwind", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+2: Two aircraft turn base at the same time.",
+                "updates": [
+                    {"callsign": "Cherokee 56T", "state": "final", "runway": "14"},
+                    {"callsign": "Cessna 23A", "state": "base", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "base", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+3: Two aircraft converge on final.",
+                "updates": [
+                    {"callsign": "Cherokee 56T", "state": "short_final", "runway": "14"},
+                    {"callsign": "Cessna 23A", "state": "final", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "final", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+4: Two aircraft are short final.",
+                "updates": [
+                    {"callsign": "Cessna 23A", "state": "short_final", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "short_final", "runway": "14"},
+                ]
+            },
         ]
     },
 
     "runway_occupied": {
         "name": "Runway Occupied + Final Conflict",
         "steps": [
-            {"callsign": "Cessna 23A", "state": "holding_short", "runway": "14"},
-            {"callsign": "Cherokee 56T", "state": "final", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "downwind", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "entering_runway", "runway": "14"},
-            {"callsign": "Cherokee 56T", "state": "short_final", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "base", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "departing", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "final", "runway": "14"},
+            {
+                "message": "T+0: Departure waiting, arrival established final.",
+                "updates": [
+                    {"callsign": "Cessna 23A", "state": "holding_short", "runway": "14"},
+                    {"callsign": "Cherokee 56T", "state": "final", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "downwind", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+1: Aircraft enters runway while arrival is short final.",
+                "updates": [
+                    {"callsign": "Cessna 23A", "state": "entering_runway", "runway": "14"},
+                    {"callsign": "Cherokee 56T", "state": "short_final", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "base", "runway": "14"},
+                ]
+            },
+            {
+                "message": "T+2: Departure rolling with following traffic turning final.",
+                "updates": [
+                    {"callsign": "Cessna 23A", "state": "departing", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "final", "runway": "14"},
+                ]
+            },
         ]
     },
 
     "opposite_direction": {
         "name": "Opposite Direction Runway Conflict",
         "steps": [
-            {"callsign": "Cherokee 56T", "state": "final", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "downwind", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "departing", "runway": "32"},
-            {"callsign": "Cherokee 56T", "state": "short_final", "runway": "14"},
-            {"callsign": "Diamond 45X", "state": "base", "runway": "14"},
-            {"callsign": "Cessna 23A", "state": "entering_runway", "runway": "32"},
+            {
+                "message": "T+0: Runway 14 arrival and runway 32 departure develop opposite-direction conflict.",
+                "updates": [
+                    {"callsign": "Cherokee 56T", "state": "final", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "downwind", "runway": "14"},
+                    {"callsign": "Cessna 23A", "state": "departing", "runway": "32"},
+                ]
+            },
+            {
+                "message": "T+1: Opposite-direction conflict continues.",
+                "updates": [
+                    {"callsign": "Cherokee 56T", "state": "short_final", "runway": "14"},
+                    {"callsign": "Diamond 45X", "state": "base", "runway": "14"},
+                    {"callsign": "Cessna 23A", "state": "entering_runway", "runway": "32"},
+                ]
+            },
         ]
     }
 }
@@ -235,7 +372,7 @@ def safe_float(value):
         return None
 
 
-def apply_aircraft_update(callsign, state, runway="14", source="manual", x=None, y=None):
+def set_aircraft_without_check(callsign, state, runway="14", source="manual", x=None, y=None):
     if x is None or y is None:
         x, y = get_backend_position(state, runway)
 
@@ -248,6 +385,9 @@ def apply_aircraft_update(callsign, state, runway="14", source="manual", x=None,
         "source": source
     }
 
+
+def apply_aircraft_update(callsign, state, runway="14", source="manual", x=None, y=None):
+    set_aircraft_without_check(callsign, state, runway, source, x, y)
     conflicts = check_conflicts()
 
     return {
@@ -260,14 +400,6 @@ def apply_aircraft_update(callsign, state, runway="14", source="manual", x=None,
 
 
 def check_conflicts():
-    """
-    Conflict logic with duplicate prevention.
-
-    Fix:
-    - Same-leg conflicts suppress proximity alerts for the same pair.
-    - Runway-occupied conflicts suppress proximity alerts for the same pair.
-    - Each active alert signature only appears once.
-    """
     global active_alerts
 
     alerts = []
@@ -277,7 +409,6 @@ def check_conflicts():
     same_state_pair_keys = set()
     runway_conflict_pair_keys = set()
 
-    # Precompute same-state groups so we can suppress weaker proximity duplicates.
     groups = {}
 
     for callsign, data in ac_list:
@@ -289,7 +420,6 @@ def check_conflicts():
             for a, b in combinations(callsigns, 2):
                 same_state_pair_keys.add(tuple(sorted([a, b])))
 
-    # Precompute runway/final conflicts so proximity does not duplicate them.
     for runway in ["14", "32"]:
         final_aircraft = [
             cs for cs, d in ac_list
@@ -323,7 +453,6 @@ def check_conflicts():
 
             pair_key = tuple(sorted([cs1, cs2]))
 
-            # Stronger rules handle these, so skip proximity duplicates.
             if pair_key in same_state_pair_keys or pair_key in runway_conflict_pair_keys:
                 continue
 
@@ -379,7 +508,6 @@ def check_conflicts():
             for downwind in downwinds:
                 pair_key = tuple(sorted([entry, downwind]))
 
-                # Avoid sending this advisory if same-state or stronger alert exists.
                 if pair_key in same_state_pair_keys or pair_key in runway_conflict_pair_keys:
                     continue
 
@@ -458,26 +586,35 @@ def process_sim_step(scenario_key, step_index):
         }
 
     step = steps[step_index]
-    callsign = step["callsign"]
-    state = step["state"]
-    runway = step.get("runway", "14")
+    updates = step.get("updates", [step])
 
-    result = apply_aircraft_update(
-        callsign=callsign,
-        state=state,
-        runway=runway,
-        source="simulated"
-    )
+    ctaf_calls = []
 
-    ctaf_call = make_ctaf_call(callsign, state, runway)
+    for update in updates:
+        callsign = update["callsign"]
+        state = update["state"]
+        runway = update.get("runway", "14")
 
-    result["done"] = False
-    result["step"] = step_index
-    result["scenario"] = scenario_key
-    result["ctaf_call"] = ctaf_call
-    result["message"] = f"SIM CTAF: {ctaf_call}"
+        set_aircraft_without_check(
+            callsign=callsign,
+            state=state,
+            runway=runway,
+            source="simulated"
+        )
 
-    return result
+        ctaf_calls.append(make_ctaf_call(callsign, state, runway))
+
+    conflicts = check_conflicts()
+
+    return {
+        "done": False,
+        "step": step_index,
+        "scenario": scenario_key,
+        "message": step.get("message", f"SIM TIME {step_index}: updated {len(updates)} aircraft"),
+        "ctaf_calls": ctaf_calls,
+        "conflicts": conflicts,
+        "aircraft": get_all_aircraft()
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -639,23 +776,44 @@ def normalize_spoken(text):
 
 
 def extract_callsign(text):
+    """
+    Extract aircraft type + callsign from a CTAF call.
+
+    This fixes typed calls like:
+    'San Martin traffic, Cessna 7TX downwind runway 14, San Martin.'
+
+    Old bad parse:
+    Cessna 7TXDOWNWIND
+
+    Correct parse:
+    Cessna 7TX
+    """
+
     norm = normalize_spoken(text.lower())
 
+    stop_words = [
+        "entering", "turning", "on", "departing", "holding", "clear",
+        "landing", "taking", "line", "runway", "traffic", "san martin",
+        "downwind", "base", "final", "short final", "crosswind", "upwind",
+        "forty five", "forty-five", "45", "taxiing", "taxi", "rollout",
+        "left", "right", "straight", "straight in", "left downwind",
+        "right downwind", "left base", "right base"
+    ]
+
+    stop_pattern = "|".join(re.escape(word) for word in stop_words)
+
     for aircraft_type in AIRCRAFT_TYPES:
-        pattern = rf'\b{aircraft_type}\s+([\dA-Za-z][\dA-Za-z\s]{{0,10}}?)(?:\s+(?:entering|turning|on|departing|holding|clear|landing|taking|line|runway|traffic|san\s+martin)|\s*,)'
+        pattern = (
+            rf'\b{aircraft_type}\s+'
+            rf'([a-zA-Z0-9\s]{{1,12}}?)'
+            rf'(?=\s+(?:{stop_pattern})\b|,|$)'
+        )
+
         match = re.search(pattern, norm)
 
         if match:
             raw = match.group(1).strip()
             callsign_id = re.sub(r'\s+', '', raw).upper()
-            return f"{aircraft_type.capitalize()} {callsign_id}"
-
-    for aircraft_type in AIRCRAFT_TYPES:
-        match = re.search(rf'\b{aircraft_type}\s+([\dA-Za-z][\dA-Za-z\s]{{1,12}})', norm)
-
-        if match:
-            raw = match.group(1).strip().split()
-            callsign_id = re.sub(r'\s+', '', ' '.join(raw[:3])).upper()
             return f"{aircraft_type.capitalize()} {callsign_id}"
 
     return None
@@ -1137,7 +1295,7 @@ td {
     <div class="section-label">CTAF Input</div>
 
     <div class="input-area">
-      <textarea id="ctaf-input" placeholder="Example: San Martin traffic, Cherokee five six tango downwind runway one four, San Martin."></textarea>
+      <textarea id="ctaf-input" placeholder="Example: San Martin traffic, Cessna 7TX downwind runway 14, San Martin."></textarea>
 
       <div class="btn-row">
         <button id="submit-btn" onclick="submitCTAF()">Transmit</button>
@@ -1146,7 +1304,7 @@ td {
       </div>
 
       <div class="sim-box">
-        <div class="sim-title">Built-In Simulation</div>
+        <div class="sim-title">Built-In Timeline Simulation</div>
 
         <select id="scenario-select">
           <option value="three_plane_pattern">Three Aircraft Pattern Flow</option>
@@ -1198,7 +1356,7 @@ td {
   <div class="map-area">
     <div class="map-title">
       <span>San Martin Airport · E16</span>
-      <span style="color:var(--accent2)">Fit View · RWY 14/32</span>
+      <span style="color:var(--accent2)">Timeline Snapshot View · RWY 14/32</span>
     </div>
 
     <div id="airport-map">
@@ -1358,16 +1516,13 @@ const SIM_ANIMATION_MS = 7600;
 const POST_STEP_BUFFER_MS = 1400;
 const MIN_STEP_MS = SIM_ANIMATION_MS + POST_STEP_BUFFER_MS;
 
-// Frontend duplicate suppression.
-// This prevents the same alert from being displayed/spoken twice in a row.
 const recentAlertTimes = new Map();
 const ALERT_DUPLICATE_WINDOW_MS = 9000;
 
 let availableVoices = [];
+let pilotVoice = null;
 let advisoryVoice = null;
 let criticalVoice = null;
-let pilotVoicePool = [];
-const pilotVoiceProfiles = new Map();
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -1384,125 +1539,61 @@ function getStateColor(state) {
   return "#00ffa3";
 }
 
-// Curated list of commonly-available female-voiced TTS names across
-// macOS/Safari, Windows/Edge, and Chrome/Android. Used for the advisory
-// system's voice (both routine advisories and critical alerts).
-const FEMALE_VOICE_NAMES = [
-  "Samantha", "Victoria", "Karen", "Moira", "Tessa", "Fiona", "Veena",
-  "Ava", "Susan", "Allison", "Nicky", "Kate", "Serena", "Zoe", "Grace",
-  "Google US English", "Google UK English Female", "Google español",
-  "Microsoft Aria", "Microsoft Zira", "Microsoft Jenny", "Microsoft Michelle",
-  "Microsoft Hazel", "Microsoft Eva", "Microsoft Susan", "Female"
-];
-
-// Curated list of commonly-available male-voiced TTS names across the same
-// platforms. Used for every pilot callsign's voice.
-const MALE_VOICE_NAMES = [
-  "Alex", "Daniel", "Fred", "Ralph", "Oliver", "Aaron", "Arthur", "Gordon",
-  "Rishi", "Thomas", "Diego", "Jorge", "Bruce", "Albert", "Tom",
-  "Google UK English Male",
-  "Microsoft David", "Microsoft Guy", "Microsoft Mark", "Microsoft Ryan",
-  "Microsoft George", "Microsoft Christopher", "Male"
-];
-
 function loadVoices() {
   if (!window.speechSynthesis) return;
 
   availableVoices = window.speechSynthesis.getVoices();
-
   if (!availableVoices || availableVoices.length === 0) return;
 
-  // Build a female-only pool by name match for the advisory system. If
-  // nothing matches (some platforms expose very few voices), fall back to
-  // English voices, then any voice, so the demo still runs.
-  let femalePool = availableVoices.filter(v =>
-    FEMALE_VOICE_NAMES.some(name => v.name.toLowerCase().includes(name.toLowerCase()))
-  );
+  function findVoice(preferredNames, excludedVoice = null) {
+    for (const preferred of preferredNames) {
+      const match = availableVoices.find(v =>
+        v.name.toLowerCase().includes(preferred.toLowerCase()) &&
+        (!excludedVoice || v.name !== excludedVoice.name)
+      );
 
-  if (femalePool.length === 0) {
-    femalePool = availableVoices.filter(v => v.lang && v.lang.toLowerCase().startsWith("en"));
-  }
+      if (match) return match;
+    }
 
-  if (femalePool.length === 0) {
-    femalePool = availableVoices;
-  }
-
-  // Advisory system and critical-alert voice: two distinct female voices
-  // (falls back to the same voice with a different pitch if only one
-  // female voice is available on this device/browser).
-  advisoryVoice = femalePool[0];
-  criticalVoice = femalePool.find(v => v.name !== advisoryVoice.name) || femalePool[0];
-
-  // Build a male-only pool by name match for pilot voices. Fall back to
-  // English voices not already used for advisory/critical, then to any
-  // remaining voice, so the demo still runs on devices with few voices.
-  let malePool = availableVoices.filter(v =>
-    MALE_VOICE_NAMES.some(name => v.name.toLowerCase().includes(name.toLowerCase()))
-  );
-
-  if (malePool.length === 0) {
-    malePool = availableVoices.filter(v =>
-      v.name !== advisoryVoice.name && v.name !== criticalVoice.name &&
-      v.lang && v.lang.toLowerCase().startsWith("en")
+    const fallback = availableVoices.find(v =>
+      (!excludedVoice || v.name !== excludedVoice.name) &&
+      v.lang.toLowerCase().startsWith("en")
     );
+
+    return fallback || availableVoices[0];
   }
 
-  if (malePool.length === 0) {
-    malePool = availableVoices.filter(v => v.lang && v.lang.toLowerCase().startsWith("en"));
-  }
+  pilotVoice = findVoice([
+    "Alex",
+    "Samantha",
+    "Google US English",
+    "Microsoft Guy",
+    "Daniel"
+  ]);
 
-  if (malePool.length === 0) {
-    malePool = availableVoices;
-  }
+  advisoryVoice = findVoice([
+    "Victoria",
+    "Karen",
+    "Moira",
+    "Microsoft Aria",
+    "Google UK English Female",
+    "Tessa"
+  ], pilotVoice);
 
-  // Every pilot callsign gets assigned a voice from this male pool, and
-  // different callsigns sound distinct from each other (see
-  // getPilotVoiceProfile below).
-  pilotVoicePool = malePool;
+  criticalVoice = findVoice([
+    "Fred",
+    "Ralph",
+    "Microsoft David",
+    "Google UK English Male",
+    "Daniel"
+  ], advisoryVoice);
 
-  // Voice objects can go stale when the browser reloads its voice list,
-  // so clear cached per-pilot assignments and let them be rebuilt lazily.
-  pilotVoiceProfiles.clear();
+  if (!criticalVoice) criticalVoice = advisoryVoice;
 }
 
 if (window.speechSynthesis) {
   loadVoices();
   window.speechSynthesis.onvoiceschanged = loadVoices;
-}
-
-// Simple deterministic string hash so the same callsign always maps to the
-// same voice/pitch/rate for the life of the page.
-function hashString(str) {
-  let hash = 0;
-
-  for (let i = 0; i < str.length; i++) {
-    hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
-  }
-
-  return hash;
-}
-
-// Returns a stable {voice, pitch, rate} profile for a given callsign, all
-// drawn from the female voice pool. Pitch/rate are also nudged per-callsign
-// so pilots still sound distinct from each other even on browsers that only
-// expose one or two female voices.
-function getPilotVoiceProfile(callsign) {
-  const key = callsign || "UNKNOWN";
-
-  if (pilotVoiceProfiles.has(key)) {
-    return pilotVoiceProfiles.get(key);
-  }
-
-  const pool = pilotVoicePool.length ? pilotVoicePool : availableVoices;
-  const hash = hashString(key);
-
-  const voice = pool.length ? pool[hash % pool.length] : null;
-  const pitch = 0.88 + (((hash % 41) - 20) / 100);        // roughly 0.68 – 1.08
-  const rate = 0.90 + (Math.floor(hash / 41) % 16) / 100; // roughly 0.90 – 1.05
-
-  const profile = { voice, pitch, rate };
-  pilotVoiceProfiles.set(key, profile);
-  return profile;
 }
 
 function shouldSuppressAlert(type, message) {
@@ -1651,7 +1742,7 @@ function updateMapDots(aircraftList) {
   }
 }
 
-function queueSpeakText(text, type, callsign = null) {
+function queueSpeakText(text, type) {
   if (!window.speechSynthesis) return Promise.resolve();
 
   loadVoices();
@@ -1661,18 +1752,17 @@ function queueSpeakText(text, type, callsign = null) {
       const utterance = new SpeechSynthesisUtterance(text);
 
       if (type === "ctaf") {
-        const profile = getPilotVoiceProfile(callsign || text);
-        utterance.voice = profile.voice;
-        utterance.rate = profile.rate;
-        utterance.pitch = profile.pitch;
+        utterance.voice = pilotVoice;
+        utterance.rate = 0.92;
+        utterance.pitch = 1.05;
       } else if (type === "critical") {
         utterance.voice = criticalVoice || advisoryVoice;
-        utterance.rate = 0.80;
-        utterance.pitch = 0.9;
+        utterance.rate = 0.78;
+        utterance.pitch = 0.72;
       } else if (type === "advisory") {
         utterance.voice = advisoryVoice;
-        utterance.rate = 0.88;
-        utterance.pitch = 1.08;
+        utterance.rate = 0.86;
+        utterance.pitch = 0.9;
       } else {
         utterance.voice = advisoryVoice;
         utterance.rate = 0.9;
@@ -1713,8 +1803,7 @@ function addAlert(type, message, callsign = null) {
   if (["critical", "advisory", "ctaf"].includes(type)) {
     return queueSpeakText(
       message.replace("SIM CTAF: ", "").replace("ADS-B REPLAY CTAF: ", ""),
-      type,
-      callsign
+      type
     );
   }
 
@@ -1815,7 +1904,15 @@ async function handleReplayData(data, label) {
 
   const speechPromises = [];
 
-  speechPromises.push(addAlert("ctaf", data.message, data.callsign));
+  if (data.ctaf_calls && data.ctaf_calls.length > 0) {
+    addAlert("info", data.message);
+
+    for (const call of data.ctaf_calls) {
+      speechPromises.push(addAlert("ctaf", "SIM CTAF: " + call));
+    }
+  } else {
+    speechPromises.push(addAlert("ctaf", data.message));
+  }
 
   updateMapDots(data.aircraft || []);
   updateAcTable(data.aircraft || []);
@@ -1889,7 +1986,7 @@ async function toggleSimulation() {
   btn.textContent = "Stop Sim";
   btn.classList.add("running");
 
-  addAlert("info", "Starting built-in aircraft CTAF simulation.");
+  addAlert("info", "Starting built-in timeline aircraft simulation.");
   runSimulationLoop();
 }
 
