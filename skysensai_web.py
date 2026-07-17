@@ -2,9 +2,55 @@ from flask import Flask, render_template_string, request, jsonify
 import csv
 import os
 import re
+import tempfile
+import threading
 from itertools import combinations
 
+from faster_whisper import WhisperModel
+
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB audio limit
+
+# Whisper is loaded lazily on the first audio request so startup stays fast.
+WHISPER_MODEL_SIZE = os.environ.get("SKYSENSAI_WHISPER_MODEL", "base.en")
+whisper_model = None
+whisper_model_lock = threading.Lock()
+
+
+def get_whisper_model():
+    global whisper_model
+
+    if whisper_model is None:
+        with whisper_model_lock:
+            if whisper_model is None:
+                print(f"Loading faster-whisper model: {WHISPER_MODEL_SIZE}")
+                whisper_model = WhisperModel(
+                    WHISPER_MODEL_SIZE,
+                    device="cpu",
+                    compute_type="int8"
+                )
+
+    return whisper_model
+
+
+def transcribe_audio_file(file_path):
+    model = get_whisper_model()
+    segments, info = model.transcribe(
+        file_path,
+        language="en",
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 350}
+    )
+
+    transcript = " ".join(
+        segment.text.strip()
+        for segment in segments
+        if segment.text and segment.text.strip()
+    ).strip()
+
+    return transcript, getattr(info, "language_probability", None)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Global traffic state
@@ -316,10 +362,34 @@ BACKEND_STATE_POSITIONS_RWY32 = {
     "unknown": (260, 335),
 }
 
+# Used when live/manual CTAF data does not include a future waypoint. Built-in
+# scenarios and ADS-B replay rows override this with their actual next update.
+DEFAULT_NEXT_STATE = {
+    "taxiing": "holding_short",
+    "holding_short": "entering_runway",
+    "entering_runway": "departing",
+    "departing": "upwind",
+    "upwind": "crosswind",
+    "crosswind": "downwind",
+    "forty_five_entry": "downwind",
+    "downwind": "base",
+    "base": "final",
+    "final": "short_final",
+    "short_final": "landed_rollout",
+    "landed_rollout": "entered_taxiway",
+    "entered_taxiway": "taxiing",
+    "clear_of_runway": "taxiing",
+    "unknown": "downwind",
+}
+
 
 def get_backend_position(state, runway):
     pos_map = BACKEND_STATE_POSITIONS_RWY32 if runway == "32" else BACKEND_STATE_POSITIONS_RWY14
     return pos_map.get(state, pos_map["unknown"])
+
+
+def get_default_next_state(state):
+    return DEFAULT_NEXT_STATE.get(state, "unknown")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -372,9 +442,26 @@ def safe_float(value):
         return None
 
 
-def set_aircraft_without_check(callsign, state, runway="14", source="manual", x=None, y=None):
+def set_aircraft_without_check(
+    callsign,
+    state,
+    runway="14",
+    source="manual",
+    x=None,
+    y=None,
+    next_state=None,
+    next_runway=None,
+    next_x=None,
+    next_y=None,
+):
     if x is None or y is None:
         x, y = get_backend_position(state, runway)
+
+    next_state = next_state or get_default_next_state(state)
+    next_runway = next_runway or runway
+
+    if next_x is None or next_y is None:
+        next_x, next_y = get_backend_position(next_state, next_runway)
 
     aircraft[callsign] = {
         "state": state,
@@ -382,6 +469,10 @@ def set_aircraft_without_check(callsign, state, runway="14", source="manual", x=
         "label": callsign,
         "x": float(x),
         "y": float(y),
+        "next_state": next_state,
+        "next_runway": next_runway,
+        "next_x": float(next_x),
+        "next_y": float(next_y),
         "source": source
     }
 
@@ -565,6 +656,22 @@ def check_conflicts():
 # Built-in simulation
 # ─────────────────────────────────────────────────────────────────────────────
 
+def find_next_scenario_update(scenario, step_index, callsign, current_state, current_runway):
+    """Return this aircraft's next changed state in the selected scenario."""
+    for future_step in scenario.get("steps", [])[step_index + 1:]:
+        for update in future_step.get("updates", [future_step]):
+            if update.get("callsign") != callsign:
+                continue
+
+            future_state = update.get("state", current_state)
+            future_runway = update.get("runway", current_runway)
+
+            if future_state != current_state or future_runway != current_runway:
+                return future_state, future_runway
+
+    return get_default_next_state(current_state), current_runway
+
+
 def process_sim_step(scenario_key, step_index):
     scenario = SIM_SCENARIOS.get(scenario_key)
 
@@ -589,19 +696,26 @@ def process_sim_step(scenario_key, step_index):
     updates = step.get("updates", [step])
 
     ctaf_calls = []
+    callsigns = []
 
     for update in updates:
         callsign = update["callsign"]
         state = update["state"]
         runway = update.get("runway", "14")
+        next_state, next_runway = find_next_scenario_update(
+            scenario, step_index, callsign, state, runway
+        )
 
         set_aircraft_without_check(
             callsign=callsign,
             state=state,
             runway=runway,
-            source="simulated"
+            source="simulated",
+            next_state=next_state,
+            next_runway=next_runway,
         )
 
+        callsigns.append(callsign)
         ctaf_calls.append(make_ctaf_call(callsign, state, runway))
 
     conflicts = check_conflicts()
@@ -612,6 +726,7 @@ def process_sim_step(scenario_key, step_index):
         "scenario": scenario_key,
         "message": step.get("message", f"SIM TIME {step_index}: updated {len(updates)} aircraft"),
         "ctaf_calls": ctaf_calls,
+        "callsigns": callsigns,
         "conflicts": conflicts,
         "aircraft": get_all_aircraft()
     }
@@ -684,6 +799,25 @@ def load_adsb_replay_file():
     return True, note or f"Loaded {len(adsb_replay_rows)} ADS-B rows from {ADSB_REPLAY_FILE}."
 
 
+def find_next_adsb_update(step_index, callsign, current_state, current_runway):
+    """Look ahead to this callsign's next changed ADS-B state/position."""
+    for future_row in adsb_replay_rows[step_index + 1:]:
+        future_callsign = (future_row.get("callsign") or future_row.get("flight") or "").strip()
+
+        if future_callsign != callsign:
+            continue
+
+        future_state = (future_row.get("state") or current_state).strip()
+        future_runway = (future_row.get("runway") or current_runway).strip()
+        future_x = safe_float(future_row.get("x"))
+        future_y = safe_float(future_row.get("y"))
+
+        if future_state != current_state or future_runway != current_runway:
+            return future_state, future_runway, future_x, future_y
+
+    return get_default_next_state(current_state), current_runway, None, None
+
+
 def process_adsb_replay_step(step_index):
     if not adsb_replay_rows:
         loaded, note = load_adsb_replay_file()
@@ -714,15 +848,30 @@ def process_adsb_replay_step(step_index):
 
     x = safe_float(row.get("x"))
     y = safe_float(row.get("y"))
+    next_state, next_runway, next_x, next_y = find_next_adsb_update(
+        step_index, callsign, state, runway
+    )
 
-    result = apply_aircraft_update(
+    set_aircraft_without_check(
         callsign=callsign,
         state=state,
         runway=runway,
         source="adsb_replay",
         x=x,
-        y=y
+        y=y,
+        next_state=next_state,
+        next_runway=next_runway,
+        next_x=next_x,
+        next_y=next_y,
     )
+
+    result = {
+        "callsign": callsign,
+        "state": state,
+        "runway": runway,
+        "conflicts": check_conflicts(),
+        "aircraft": get_all_aircraft(),
+    }
 
     ctaf_call = make_ctaf_call(callsign, state, runway)
 
@@ -759,65 +908,123 @@ PHONETIC_ALPHA = {
 AIRCRAFT_TYPES = [
     "cherokee", "cessna", "piper", "diamond", "beechcraft", "cirrus",
     "mooney", "bonanza", "archer", "warrior", "skyhawk", "skylane",
-    "seminole", "seneca", "twin", "king air", "baron"
+    "seminole", "seneca", "twin", "king air", "baron", "helicopter",
+    "experimental", "citabria", "decathlon", "cub", "rv"
 ]
 
 
 def normalize_spoken(text):
-    text = text.lower()
+    """
+    Normalize common aviation/Whisper transcription variants.
+
+    Examples:
+    "seven tango x-ray" -> "7 T X"
+    "x ray"             -> "X"
+    "niner"             -> "9"
+    """
+    text = str(text or "").lower()
+
+    # Normalize punctuation and common Whisper formatting.
+    text = text.replace("x-ray", "xray")
+    text = re.sub(r"[\u2010-\u2015]", "-", text)
+    text = re.sub(r"[.,;:!?()\[\]{}]", " ", text)
+
+    # Common aviation pronunciation variants.
+    spoken_digit_aliases = {
+        "tree": "3",
+        "fife": "5",
+        "niner": "9",
+    }
+
+    for word, digit in spoken_digit_aliases.items():
+        text = re.sub(rf"\b{re.escape(word)}\b", digit, text)
+
+    # Match longer phrases first.
+    alpha_aliases = {
+        "x ray": "X",
+        "xray": "X",
+    }
+
+    for phrase, letter in alpha_aliases.items():
+        text = re.sub(rf"\b{re.escape(phrase)}\b", f" {letter} ", text)
 
     for word, digit in PHONETIC_DIGITS.items():
-        text = re.sub(r'\b' + word + r'\b', digit, text)
+        text = re.sub(rf"\b{re.escape(word)}\b", f" {digit} ", text)
 
     for word, letter in PHONETIC_ALPHA.items():
-        text = re.sub(r'\b' + word + r'\b', letter, text)
+        text = re.sub(rf"\b{re.escape(word)}\b", f" {letter} ", text)
 
+    text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _compact_callsign_id(raw):
+    """Keep only letters and digits from a possible callsign."""
+    return re.sub(r"[^A-Za-z0-9]", "", raw or "").upper()
 
 
 def extract_callsign(text):
     """
-    Extract aircraft type + callsign from a CTAF call.
+    Extract an aircraft-type callsign or registration-style callsign.
 
-    This fixes typed calls like:
-    'San Martin traffic, Cessna 7TX downwind runway 14, San Martin.'
-
-    Old bad parse:
-    Cessna 7TXDOWNWIND
-
-    Correct parse:
-    Cessna 7TX
+    Supported examples:
+    - Cessna 7TX downwind runway 14
+    - Cessna seven tango x-ray downwind runway one four
+    - Cherokee five six tango turning base
+    - November two three alpha final runway 14
+    - N23A short final
     """
+    norm = normalize_spoken(text)
 
-    norm = normalize_spoken(text.lower())
-
-    stop_words = [
-        "entering", "turning", "on", "departing", "holding", "clear",
-        "landing", "taking", "line", "runway", "traffic", "san martin",
-        "downwind", "base", "final", "short final", "crosswind", "upwind",
-        "forty five", "forty-five", "45", "taxiing", "taxi", "rollout",
-        "left", "right", "straight", "straight in", "left downwind",
-        "right downwind", "left base", "right base"
+    # These phrases usually begin immediately after the callsign.
+    stop_phrases = [
+        "short final", "straight in", "forty five", "45 degree entry",
+        "45 entry", "left downwind", "right downwind", "left base",
+        "right base", "entering", "turning", "departing", "departure",
+        "holding", "clear", "landing", "landed", "taking", "line up",
+        "runway", "traffic", "san martin", "downwind", "crosswind",
+        "upwind", "base", "final", "taxiing", "taxi", "rollout",
+        "left", "right", "on"
     ]
 
-    stop_pattern = "|".join(re.escape(word) for word in stop_words)
+    stop_pattern = "|".join(
+        sorted((re.escape(item) for item in stop_phrases), key=len, reverse=True)
+    )
 
-    for aircraft_type in AIRCRAFT_TYPES:
+    # Aircraft type followed by an identifier.
+    for aircraft_type in sorted(AIRCRAFT_TYPES, key=len, reverse=True):
         pattern = (
-            rf'\b{aircraft_type}\s+'
-            rf'([a-zA-Z0-9\s]{{1,12}}?)'
-            rf'(?=\s+(?:{stop_pattern})\b|,|$)'
+            rf"\b{re.escape(aircraft_type)}\s+"
+            rf"([A-Za-z0-9](?:[A-Za-z0-9\s-]{{0,18}}?))"
+            rf"(?=\s+(?:{stop_pattern})\b|$)"
         )
-
-        match = re.search(pattern, norm)
+        match = re.search(pattern, norm, flags=re.IGNORECASE)
 
         if match:
-            raw = match.group(1).strip()
-            callsign_id = re.sub(r'\s+', '', raw).upper()
-            return f"{aircraft_type.capitalize()} {callsign_id}"
+            callsign_id = _compact_callsign_id(match.group(1))
+
+            # Avoid accepting position words accidentally as an identifier.
+            if 2 <= len(callsign_id) <= 10:
+                return f"{aircraft_type.title()} {callsign_id}"
+
+    # Registration-style callsigns beginning with "November" or "N".
+    registration_patterns = [
+        rf"\bnovember\s+([0-9A-Za-z](?:[0-9A-Za-z\s-]{{0,12}}?))"
+        rf"(?=\s+(?:{stop_pattern})\b|$)",
+        rf"\bN\s*([0-9][0-9A-Za-z\s-]{{1,8}}?)"
+        rf"(?=\s+(?:{stop_pattern})\b|$)",
+    ]
+
+    for pattern in registration_patterns:
+        match = re.search(pattern, norm, flags=re.IGNORECASE)
+        if not match:
+            continue
+
+        callsign_id = _compact_callsign_id(match.group(1))
+        if 2 <= len(callsign_id) <= 8:
+            return f"N{callsign_id}"
 
     return None
-
 
 def extract_runway(text):
     norm = normalize_spoken(text.lower())
@@ -881,21 +1088,38 @@ def process_ctaf(text):
     runway = extract_runway(text)
     state = extract_state(text)
 
+    diagnostics = {
+        "text": text,
+        "detected_callsign": callsign,
+        "detected_runway": runway,
+        "detected_state": state,
+    }
+
     if not callsign:
-        return {"error": "Could not identify callsign", "text": text}
+        return {
+            **diagnostics,
+            "error": "Could not identify callsign"
+        }
 
     if not state:
-        return {"error": f"Could not identify state for {callsign}", "text": text}
+        return {
+            **diagnostics,
+            "callsign": callsign,
+            "error": f"Could not identify state for {callsign}"
+        }
 
     previous_runway = aircraft.get(callsign, {}).get("runway")
     selected_runway = runway or previous_runway or "14"
 
-    return apply_aircraft_update(
+    result = apply_aircraft_update(
         callsign=callsign,
         state=state,
         runway=selected_runway,
         source="ctaf"
     )
+
+    result.update(diagnostics)
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -938,6 +1162,68 @@ def api_adsb_step():
     data = request.json or {}
     step = int(data.get("step", 0))
     return jsonify(process_adsb_replay_step(step))
+
+
+@app.route("/api/audio/transcribe", methods=["POST"])
+def api_audio_transcribe():
+    """Receive audio, transcribe it, and return the raw transcript even if parsing fails."""
+    audio = request.files.get("audio")
+
+    if audio is None:
+        return jsonify({
+            "error": "No audio file was received.",
+            "transcript": ""
+        }), 400
+
+    if not audio.filename:
+        return jsonify({
+            "error": "The uploaded audio file has no filename.",
+            "transcript": ""
+        }), 400
+
+    suffix = os.path.splitext(audio.filename)[1].lower() or ".webm"
+    temp_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            temp_path = temp_file.name
+            audio.save(temp_path)
+
+        transcript, language_probability = transcribe_audio_file(temp_path)
+
+        if not transcript:
+            return jsonify({
+                "error": "No speech was detected. Try increasing the volume and speaking at a moderate, clear pace.",
+                "transcript": "",
+                "audio_filename": audio.filename,
+                "language_probability": language_probability
+            }), 422
+
+        result = process_ctaf(transcript)
+
+        # Always return the exact Whisper transcript and parser diagnostics.
+        result["transcript"] = transcript
+        result["language_probability"] = language_probability
+        result["audio_filename"] = audio.filename
+
+        # Keep parse errors as JSON responses the frontend can inspect.
+        # HTTP 200 is intentional so the UI can display the transcript cleanly.
+        return jsonify(result)
+
+    except Exception as exc:
+        app.logger.exception("Audio transcription failed")
+        return jsonify({
+            "error": f"Audio transcription failed: {exc}",
+            "transcript": "",
+            "audio_filename": audio.filename
+        }), 500
+
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1099,6 +1385,37 @@ button {
 #reset-btn {
   color: var(--crit);
   border-color: var(--crit);
+}
+
+#audio-file-input {
+  display: none;
+}
+
+#audio-upload-btn,
+#computer-audio-btn {
+  flex: 1;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+#mic-btn {
+  min-width: 48px;
+}
+
+#mic-btn.recording,
+#computer-audio-btn.recording {
+  background: var(--crit);
+  border-color: var(--crit);
+  color: white;
+  box-shadow: 0 0 12px rgba(255, 59, 59, 0.45);
+}
+
+.audio-status {
+  margin-top: 7px;
+  min-height: 16px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  line-height: 1.35;
 }
 
 .sim-box {
@@ -1281,6 +1598,24 @@ td {
   display: inline-block;
   margin-right: 6px;
 }
+
+.compass-rose {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  background: rgba(10,14,26,0.82);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px 4px;
+  text-align: center;
+}
+
+.compass-caption {
+  font-size: 0.56rem;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  margin-top: 2px;
+}
 </style>
 </head>
 
@@ -1299,8 +1634,23 @@ td {
 
       <div class="btn-row">
         <button id="submit-btn" onclick="submitCTAF()">Transmit</button>
-        <button id="mic-btn" onclick="toggleMic()">🎙</button>
+        <button id="mic-btn"
+                title="Hold to record microphone audio"
+                onpointerdown="startPushToTalk(event)"
+                onpointerup="stopPushToTalk(event)"
+                onpointercancel="stopPushToTalk(event)"
+                onpointerleave="cancelPushToTalkIfNeeded(event)">Hold PTT</button>
         <button id="reset-btn" onclick="resetAll()">Reset</button>
+      </div>
+
+      <div class="btn-row">
+        <input id="audio-file-input" type="file" accept="audio/*" onchange="handleAudioFileSelected(event)">
+        <button id="audio-upload-btn" onclick="document.getElementById('audio-file-input').click()">Upload Audio</button>
+        <button id="computer-audio-btn" onclick="toggleComputerAudio()">Capture Tab Audio</button>
+      </div>
+
+      <div id="audio-status" class="audio-status">
+        Hold PTT for microphone audio, upload an audio file, or capture shared tab audio.
       </div>
 
       <div class="sim-box">
@@ -1454,6 +1804,30 @@ td {
         <g id="aircraft-layer"></g>
       </svg>
 
+      <div class="compass-rose">
+        <svg viewBox="0 0 100 100" width="96" height="96">
+          <circle cx="50" cy="50" r="46" fill="rgba(13,31,18,0.55)" stroke="rgba(90,122,153,0.5)" stroke-width="1"/>
+          <circle cx="50" cy="50" r="38" fill="none" stroke="rgba(90,122,153,0.3)" stroke-width="1"/>
+
+          <line x1="50" y1="6" x2="50" y2="94" stroke="rgba(90,122,153,0.25)" stroke-width="1"/>
+          <line x1="6" y1="50" x2="94" y2="50" stroke="rgba(90,122,153,0.25)" stroke-width="1"/>
+
+          <line x1="74.4" y1="79.1" x2="25.6" y2="20.9"
+            stroke="var(--accent2)" stroke-width="2.5" stroke-linecap="round"/>
+
+          <polygon points="50,8 46,18 54,18" fill="var(--text)"/>
+
+          <text x="50" y="17" fill="var(--text)" font-size="9" font-family="monospace" text-anchor="middle">N</text>
+          <text x="87" y="53" fill="var(--muted)" font-size="8" font-family="monospace" text-anchor="middle">E</text>
+          <text x="50" y="91" fill="var(--muted)" font-size="8" font-family="monospace" text-anchor="middle">S</text>
+          <text x="13" y="53" fill="var(--muted)" font-size="8" font-family="monospace" text-anchor="middle">W</text>
+
+          <text x="79" y="88" fill="var(--accent2)" font-size="8" font-family="monospace" text-anchor="middle">14</text>
+          <text x="21" y="14" fill="var(--accent2)" font-size="8" font-family="monospace" text-anchor="middle">32</text>
+        </svg>
+        <div class="compass-caption">RWY 14/32 · 140°/320°</div>
+      </div>
+
       <div class="legend">
         <div><span class="legend-dot" style="background:rgba(0,200,255,0.7)"></span>Pattern leg</div>
         <div><span class="legend-dot" style="background:rgba(0,255,100,0.8)"></span>Final</div>
@@ -1503,6 +1877,27 @@ const STATE_POSITIONS_RWY32 = {
 
 const CRITICAL_STATES = ["entering_runway", "departing", "short_final", "final", "landed_rollout"];
 
+// Simple top-down airplane silhouette (straight-line path), nose pointing
+// "up" (negative y) by default. Used in place of the old plain dots.
+const AIRPLANE_ICON_PATH = "M0,-7 L1,-1.4 L6.4,1.4 L6.4,2.8 L1,2.1 L2.8,6.4 L2.8,7.5 L0,6 L-2.8,7.5 L-2.8,6.4 L-1,2.1 L-6.4,2.8 L-6.4,1.4 L-1,-1.4 Z";
+
+// Calculate a screen bearing dynamically. The SVG airplane points north at
+// 0 degrees, so atan2(dx, -dy) gives clockwise degrees from north.
+function getBearing(fromX, fromY, toX, toY, fallback = 0) {
+  const dx = Number(toX) - Number(fromX);
+  const dy = Number(toY) - Number(fromY);
+
+  if (!Number.isFinite(dx) || !Number.isFinite(dy) || Math.hypot(dx, dy) < 0.5) {
+    return fallback;
+  }
+
+  return (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360;
+}
+
+function shortestHeadingDelta(from, to) {
+  return ((to - from + 540) % 360) - 180;
+}
+
 let acDots = {};
 let speechQueue = Promise.resolve();
 
@@ -1519,11 +1914,6 @@ const MIN_STEP_MS = SIM_ANIMATION_MS + POST_STEP_BUFFER_MS;
 const recentAlertTimes = new Map();
 const ALERT_DUPLICATE_WINDOW_MS = 9000;
 
-let availableVoices = [];
-let pilotVoice = null;
-let advisoryVoice = null;
-let criticalVoice = null;
-
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -1539,61 +1929,170 @@ function getStateColor(state) {
   return "#00ffa3";
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Voices: advisory system is FEMALE (routine + critical). Every pilot is
+// MALE, but each callsign gets its own accent so pilots sound distinct.
+// ─────────────────────────────────────────────────────────────────────────
+
+let availableVoices = [];
+let advisoryVoice = null;
+let criticalVoice = null;
+let malePilotAccentPool = [];
+const pilotVoiceProfiles = new Map();
+
+// Female voice names, used for the advisory system.
+const FEMALE_VOICE_NAMES = [
+  "Samantha", "Victoria", "Karen", "Moira", "Tessa", "Fiona", "Veena",
+  "Ava", "Susan", "Allison", "Nicky", "Kate", "Serena", "Zoe", "Grace",
+  "Google US English", "Google UK English Female", "Google español",
+  "Microsoft Aria", "Microsoft Zira", "Microsoft Jenny", "Microsoft Michelle",
+  "Microsoft Hazel", "Microsoft Eva", "Microsoft Susan", "Shelley", "Female"
+];
+
+// General male-name fallback, only used if no accent-tagged voice can be
+// found at all (very sparse voice lists).
+const MALE_VOICE_NAMES = [
+  "Alex", "Daniel", "Fred", "Ralph", "Oliver", "Aaron", "Arthur", "Gordon",
+  "Thomas", "Diego", "Jorge", "Bruce", "Albert", "Tom", "Lee", "Rishi",
+  "Reed", "Eddy", "Rocko",
+  "Microsoft David", "Microsoft Guy", "Microsoft Mark", "Microsoft Ryan",
+  "Microsoft George", "Microsoft Christopher", "Microsoft William",
+  "Microsoft Ravi", "Microsoft Prabhat", "Microsoft Colm", "Microsoft Luke",
+  "Microsoft Liam", "Microsoft Mitchell", "Male"
+];
+
+// Male voices grouped by accent/locale, so each pilot callsign can be
+// assigned a distinct-sounding, distinctly-accented MALE voice.
+const MALE_ACCENTS = [
+  { label: "US", langPrefix: "en-US", names: ["Microsoft Guy", "Microsoft Christopher", "Alex", "Fred", "Tom", "Reed", "Eddy"] },
+  { label: "UK", langPrefix: "en-GB", names: ["Google UK English Male", "Microsoft Ryan", "Microsoft George", "Daniel", "Arthur", "Oliver"] },
+  { label: "AU", langPrefix: "en-AU", names: ["Google Australian English", "Microsoft William", "Lee"] },
+  { label: "IN", langPrefix: "en-IN", names: ["Microsoft Prabhat", "Microsoft Ravi", "Rishi"] },
+  { label: "IE", langPrefix: "en-IE", names: ["Microsoft Colm"] },
+  { label: "ZA", langPrefix: "en-ZA", names: ["Microsoft Luke"] },
+  { label: "CA", langPrefix: "en-CA", names: ["Microsoft Liam"] },
+  { label: "NZ", langPrefix: "en-NZ", names: ["Microsoft Mitchell"] }
+];
+
+function voiceNameMatches(voice, names) {
+  const voiceName = (voice?.name || "").toLowerCase();
+  return names.some(name => voiceName.includes(name.toLowerCase()));
+}
+
+function isNamedFemaleVoice(voice) {
+  return voiceNameMatches(voice, FEMALE_VOICE_NAMES);
+}
+
+function isNamedMaleVoice(voice) {
+  return voiceNameMatches(voice, MALE_VOICE_NAMES);
+}
+
+function buildMaleAccentPool() {
+  const pool = [];
+  const maleVoices = availableVoices.filter(v =>
+    isNamedMaleVoice(v) && !isNamedFemaleVoice(v)
+  );
+
+  for (const accent of MALE_ACCENTS) {
+    const voice = maleVoices.find(v =>
+      v.lang && v.lang.toLowerCase().startsWith(accent.langPrefix.toLowerCase()) &&
+      accent.names.some(n => v.name.toLowerCase().includes(n.toLowerCase()))
+    );
+
+    if (voice) {
+      pool.push({ voice, accent: accent.label });
+    }
+  }
+
+  // Do not use an arbitrary locale voice here: browsers do not expose a
+  // gender property, and that was how Cessna 23A could receive a female
+  // voice. Only known male voice names are eligible for pilot assignments.
+  if (pool.length === 0) {
+    maleVoices.forEach((v, i) => pool.push({ voice: v, accent: `M${i + 1}` }));
+  }
+
+  return pool;
+}
+
 function loadVoices() {
   if (!window.speechSynthesis) return;
 
   availableVoices = window.speechSynthesis.getVoices();
   if (!availableVoices || availableVoices.length === 0) return;
 
-  function findVoice(preferredNames, excludedVoice = null) {
-    for (const preferred of preferredNames) {
-      const match = availableVoices.find(v =>
-        v.name.toLowerCase().includes(preferred.toLowerCase()) &&
-        (!excludedVoice || v.name !== excludedVoice.name)
-      );
+  // Advisory system: female pool, with two distinct voices for routine
+  // advisories vs. critical alerts (falls back to the same voice with a
+  // different pitch if the device only exposes one female voice).
+  let femalePool = availableVoices.filter(v =>
+    isNamedFemaleVoice(v) && !isNamedMaleVoice(v)
+  );
 
-      if (match) return match;
-    }
-
-    const fallback = availableVoices.find(v =>
-      (!excludedVoice || v.name !== excludedVoice.name) &&
-      v.lang.toLowerCase().startsWith("en")
+  if (femalePool.length === 0) {
+    femalePool = availableVoices.filter(v =>
+      !isNamedMaleVoice(v) && v.lang && v.lang.toLowerCase().startsWith("en")
     );
-
-    return fallback || availableVoices[0];
   }
 
-  pilotVoice = findVoice([
-    "Alex",
-    "Samantha",
-    "Google US English",
-    "Microsoft Guy",
-    "Daniel"
-  ]);
+  if (femalePool.length === 0) {
+    femalePool = availableVoices;
+  }
 
-  advisoryVoice = findVoice([
-    "Victoria",
-    "Karen",
-    "Moira",
-    "Microsoft Aria",
-    "Google UK English Female",
-    "Tessa"
-  ], pilotVoice);
+  advisoryVoice = femalePool[0];
+  criticalVoice = femalePool.find(v => v.name !== advisoryVoice.name) || femalePool[0];
 
-  criticalVoice = findVoice([
-    "Fred",
-    "Ralph",
-    "Microsoft David",
-    "Google UK English Male",
-    "Daniel"
-  ], advisoryVoice);
+  // Pilots: male, accent-diverse pool, one accent per callsign.
+  malePilotAccentPool = buildMaleAccentPool();
 
-  if (!criticalVoice) criticalVoice = advisoryVoice;
+  // Voice objects can go stale when the browser reloads its voice list, so
+  // clear cached per-pilot assignments and let them be rebuilt lazily.
+  pilotVoiceProfiles.clear();
 }
 
 if (window.speechSynthesis) {
   loadVoices();
   window.speechSynthesis.onvoiceschanged = loadVoices;
+}
+
+// Simple deterministic string hash so the same callsign always maps to the
+// same accent/voice/pitch/rate for the life of the page.
+function hashString(str) {
+  let hash = 0;
+
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+  }
+
+  return hash;
+}
+
+// Returns a stable {voice, accent, pitch, rate} profile for a given
+// callsign. Every profile is drawn from the male accent pool, so every
+// pilot is male, but each callsign gets its own accent plus a small
+// pitch/rate nudge, so callsigns stay distinguishable even when the browser
+// only exposes a couple of distinct accents.
+function getPilotVoiceProfile(callsign) {
+  const key = (callsign || "UNKNOWN").replace(/\s+/g, " ").trim();
+
+  if (pilotVoiceProfiles.has(key)) {
+    return pilotVoiceProfiles.get(key);
+  }
+
+  const pool = malePilotAccentPool.length ? malePilotAccentPool : [{ voice: null, accent: "V1" }];
+  const hash = hashString(key);
+  const isCessna23A = key.toUpperCase() === "CESSNA 23A";
+
+  // Cessna 23A is explicitly pinned to the first known male voice. Every
+  // other pilot also comes only from the male pool, with deterministic
+  // variation so the scenario pilots remain easy to distinguish.
+  const entry = pool[isCessna23A ? 0 : hash % pool.length];
+  const pitch = isCessna23A
+    ? 0.78
+    : 0.80 + (((hash % 17) - 8) / 100);                  // roughly 0.72 – 0.88
+  const rate = 0.90 + (Math.floor(hash / 31) % 16) / 100;  // roughly 0.90 – 1.05
+
+  const profile = { voice: entry.voice, accent: entry.accent, pitch, rate };
+  pilotVoiceProfiles.set(key, profile);
+  return profile;
 }
 
 function shouldSuppressAlert(type, message) {
@@ -1624,13 +2123,21 @@ function setDotPosition(dot, x, y) {
   dot.g.setAttribute("transform", `translate(${x},${y})`);
 }
 
-function animateDotTo(dot, targetX, targetY, duration = SIM_ANIMATION_MS) {
+function setPlaneHeading(dot, heading) {
+  const normalized = ((Number(heading) % 360) + 360) % 360;
+  dot.heading = normalized;
+  dot.planeGroup.setAttribute("transform", `rotate(${normalized})`);
+}
+
+function animateDotTo(dot, targetX, targetY, targetHeading, duration = SIM_ANIMATION_MS) {
   if (dot.animFrame) {
     cancelAnimationFrame(dot.animFrame);
   }
 
   const startX = dot.x ?? targetX;
   const startY = dot.y ?? targetY;
+  const startHeading = dot.heading ?? targetHeading;
+  const headingDelta = shortestHeadingDelta(startHeading, targetHeading);
   const startTime = performance.now();
 
   function easeInOut(t) {
@@ -1645,8 +2152,12 @@ function animateDotTo(dot, targetX, targetY, duration = SIM_ANIMATION_MS) {
 
     const x = startX + (targetX - startX) * t;
     const y = startY + (targetY - startY) * t;
+    const heading = startHeading + headingDelta * t;
 
     setDotPosition(dot, x, y);
+    setPlaneHeading(dot, heading);
+    dot.x = x;
+    dot.y = y;
 
     if (rawT < 1) {
       dot.animFrame = requestAnimationFrame(step);
@@ -1654,6 +2165,8 @@ function animateDotTo(dot, targetX, targetY, duration = SIM_ANIMATION_MS) {
       dot.x = targetX;
       dot.y = targetY;
       setDotPosition(dot, targetX, targetY);
+      setPlaneHeading(dot, targetHeading);
+      dot.animFrame = null;
     }
   }
 
@@ -1674,24 +2187,38 @@ function updateMapDots(aircraftList) {
     };
 
     const color = getStateColor(ac.state);
+    const nextState = ac.next_state || ac.state;
+    const nextRunway = ac.next_runway || ac.runway;
+    const nextFallback = getPosition(nextState, nextRunway);
+    const upcomingPos = {
+      x: ac.next_x !== undefined && ac.next_x !== null ? Number(ac.next_x) : nextFallback.x,
+      y: ac.next_y !== undefined && ac.next_y !== null ? Number(ac.next_y) : nextFallback.y
+    };
+    const previousHeading = acDots[ac.callsign]?.heading ?? (ac.runway === "32" ? 320 : 140);
+    const heading = getBearing(pos.x, pos.y, upcomingPos.x, upcomingPos.y, previousHeading);
 
     if (!acDots[ac.callsign]) {
       const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
 
       const pulse = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-      pulse.setAttribute("r", "7");
+      pulse.setAttribute("r", "9");
       pulse.setAttribute("stroke", color);
       pulse.setAttribute("stroke-width", "1");
       pulse.setAttribute("fill", "none");
       pulse.setAttribute("opacity", "0.5");
-      pulse.innerHTML = `<animate attributeName="r" values="7;16;7" dur="2s" repeatCount="indefinite"/>
+      pulse.innerHTML = `<animate attributeName="r" values="9;18;9" dur="2s" repeatCount="indefinite"/>
                          <animate attributeName="opacity" values="0.6;0;0.6" dur="2s" repeatCount="indefinite"/>`;
 
-      const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-      circle.setAttribute("r", "7");
-      circle.setAttribute("stroke", "#fff");
-      circle.setAttribute("stroke-width", "1.5");
-      circle.setAttribute("fill", color);
+      const planeGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+
+      const plane = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      plane.setAttribute("d", AIRPLANE_ICON_PATH);
+      plane.setAttribute("stroke", "#fff");
+      plane.setAttribute("stroke-width", "1");
+      plane.setAttribute("stroke-linejoin", "round");
+      plane.setAttribute("fill", color);
+
+      planeGroup.appendChild(plane);
 
       const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
       text.setAttribute("y", "20");
@@ -1703,31 +2230,34 @@ function updateMapDots(aircraftList) {
       text.textContent = ac.callsign;
 
       g.appendChild(pulse);
-      g.appendChild(circle);
+      g.appendChild(planeGroup);
       g.appendChild(text);
       layer.appendChild(g);
 
       acDots[ac.callsign] = {
         g,
-        circle,
+        plane,
+        planeGroup,
         text,
         pulse,
         x: pos.x,
         y: pos.y,
+        heading,
         animFrame: null
       };
 
       setDotPosition(acDots[ac.callsign], pos.x, pos.y);
+      setPlaneHeading(acDots[ac.callsign], heading);
     }
 
     const dot = acDots[ac.callsign];
 
-    dot.circle.setAttribute("fill", color);
+    dot.plane.setAttribute("fill", color);
     dot.text.setAttribute("fill", color);
     dot.text.textContent = ac.callsign;
     dot.pulse.setAttribute("stroke", color);
 
-    animateDotTo(dot, pos.x, pos.y, SIM_ANIMATION_MS);
+    animateDotTo(dot, pos.x, pos.y, heading, SIM_ANIMATION_MS);
   }
 
   for (const callsign of Object.keys(acDots)) {
@@ -1742,7 +2272,7 @@ function updateMapDots(aircraftList) {
   }
 }
 
-function queueSpeakText(text, type) {
+function queueSpeakText(text, type, callsign = null) {
   if (!window.speechSynthesis) return Promise.resolve();
 
   loadVoices();
@@ -1752,17 +2282,18 @@ function queueSpeakText(text, type) {
       const utterance = new SpeechSynthesisUtterance(text);
 
       if (type === "ctaf") {
-        utterance.voice = pilotVoice;
-        utterance.rate = 0.92;
-        utterance.pitch = 1.05;
+        const profile = getPilotVoiceProfile(callsign || text);
+        utterance.voice = profile.voice;
+        utterance.rate = profile.rate;
+        utterance.pitch = profile.pitch;
       } else if (type === "critical") {
         utterance.voice = criticalVoice || advisoryVoice;
-        utterance.rate = 0.78;
-        utterance.pitch = 0.72;
+        utterance.rate = 0.80;
+        utterance.pitch = 0.9;
       } else if (type === "advisory") {
         utterance.voice = advisoryVoice;
-        utterance.rate = 0.86;
-        utterance.pitch = 0.9;
+        utterance.rate = 0.88;
+        utterance.pitch = 1.08;
       } else {
         utterance.voice = advisoryVoice;
         utterance.rate = 0.9;
@@ -1803,7 +2334,8 @@ function addAlert(type, message, callsign = null) {
   if (["critical", "advisory", "ctaf"].includes(type)) {
     return queueSpeakText(
       message.replace("SIM CTAF: ", "").replace("ADS-B REPLAY CTAF: ", ""),
-      type
+      type,
+      callsign
     );
   }
 
@@ -1865,6 +2397,9 @@ async function submitCTAF() {
 }
 
 async function resetAll() {
+  if (pushToTalkActive) stopPushToTalk();
+  if (computerAudioActive || displayStream) stopComputerAudioCapture(false);
+
   await fetch("/api/reset", {method:"POST"});
 
   if (window.speechSynthesis) {
@@ -1907,11 +2442,13 @@ async function handleReplayData(data, label) {
   if (data.ctaf_calls && data.ctaf_calls.length > 0) {
     addAlert("info", data.message);
 
-    for (const call of data.ctaf_calls) {
-      speechPromises.push(addAlert("ctaf", "SIM CTAF: " + call));
-    }
+    const callsigns = data.callsigns || [];
+
+    data.ctaf_calls.forEach((call, i) => {
+      speechPromises.push(addAlert("ctaf", "SIM CTAF: " + call, callsigns[i] || null));
+    });
   } else {
-    speechPromises.push(addAlert("ctaf", data.message));
+    speechPromises.push(addAlert("ctaf", data.message, data.callsign || null));
   }
 
   updateMapDots(data.aircraft || []);
@@ -2075,47 +2612,323 @@ document.getElementById("scenario-select").addEventListener("change", () => {
   simStepIndex = 0;
 });
 
-let recognition = null;
-let isListening = false;
+let microphoneStream = null;
+let microphoneRecorder = null;
+let microphoneChunks = [];
+let pushToTalkActive = false;
 
-function toggleMic() {
-  if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
-    addAlert("info", "Speech recognition not supported in this browser.");
+let displayStream = null;
+let displayRecorder = null;
+let displayChunks = [];
+let computerAudioActive = false;
+
+function setAudioStatus(message) {
+  const status = document.getElementById("audio-status");
+  if (status) status.textContent = message;
+}
+
+function chooseRecorderMimeType() {
+  const preferredTypes = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/mp4",
+    "audio/ogg;codecs=opus"
+  ];
+
+  for (const type of preferredTypes) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(type)) {
+      return type;
+    }
+  }
+
+  return "";
+}
+
+function extensionForMimeType(mimeType) {
+  if (mimeType.includes("mp4")) return "m4a";
+  if (mimeType.includes("ogg")) return "ogg";
+  if (mimeType.includes("wav")) return "wav";
+  return "webm";
+}
+
+async function uploadAudioBlob(blob, filename, sourceLabel) {
+  if (!blob || blob.size === 0) {
+    addAlert("info", "No audio was captured.");
+    setAudioStatus("No audio was captured.");
     return;
   }
 
-  if (isListening) {
-    recognition.stop();
+  const formData = new FormData();
+  formData.append("audio", blob, filename);
+
+  setAudioStatus(`${sourceLabel}: transcribing audio…`);
+  addAlert("info", `${sourceLabel}: sending audio to Whisper for transcription.`);
+
+  try {
+    const response = await fetch("/api/audio/transcribe", {
+      method: "POST",
+      body: formData
+    });
+
+    let data;
+
+    try {
+      data = await response.json();
+    } catch (jsonError) {
+      throw new Error(`Server returned ${response.status} without valid JSON.`);
+    }
+
+    // Always show exactly what Whisper heard, even if CTAF parsing fails.
+    if (data.transcript) {
+      const input = document.getElementById("ctaf-input");
+      input.value = data.transcript;
+      addAlert("ctaf", `WHISPER TRANSCRIPT: ${data.transcript}`, data.callsign || null);
+    }
+
+    if (!response.ok || data.error) {
+      const message = data.error || `Server returned ${response.status}.`;
+      const diagnosticParts = [];
+
+      if (data.detected_callsign) {
+        diagnosticParts.push(`callsign=${data.detected_callsign}`);
+      }
+      if (data.detected_state) {
+        diagnosticParts.push(`state=${data.detected_state.replace(/_/g, " ")}`);
+      }
+      if (data.detected_runway) {
+        diagnosticParts.push(`runway=${data.detected_runway}`);
+      }
+
+      const diagnosticText = diagnosticParts.length
+        ? ` Detected: ${diagnosticParts.join(", ")}.`
+        : "";
+
+      addAlert(
+        "info",
+        `${sourceLabel} parsing error: ${message}.${diagnosticText}`
+      );
+
+      setAudioStatus(
+        data.transcript
+          ? `${sourceLabel}: transcript received, but CTAF parsing was incomplete.`
+          : `${sourceLabel} error: ${message}`
+      );
+
+      return;
+    }
+
+    setAudioStatus(`${sourceLabel}: transcript recognized and traffic updated.`);
+
+    addAlert(
+      "info",
+      `${data.callsign} → ${data.state.replace(/_/g, " ")} · Runway ${data.runway}`,
+      data.callsign
+    );
+
+    updateMapDots(data.aircraft || []);
+    updateAcTable(data.aircraft || []);
+
+    for (const conflict of data.conflicts || []) {
+      addAlert(conflict.type, conflict.message);
+    }
+
+  } catch (error) {
+    addAlert("info", `${sourceLabel} connection error: ${error.message}`);
+    setAudioStatus(`${sourceLabel} connection error.`);
+  }
+}
+
+async function startPushToTalk(event) {
+  event.preventDefault();
+
+  if (pushToTalkActive) return;
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    addAlert("info", "Microphone recording is not supported in this browser.");
     return;
   }
 
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  recognition = new SR();
-  recognition.lang = "en-US";
-  recognition.interimResults = false;
-  recognition.maxAlternatives = 1;
+  try {
+    microphoneStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
 
-  recognition.onstart = () => {
-    isListening = true;
-    document.getElementById("mic-btn").textContent = "⏹";
-  };
+    microphoneChunks = [];
+    const mimeType = chooseRecorderMimeType();
 
-  recognition.onresult = event => {
-    const transcript = event.results[0][0].transcript;
-    document.getElementById("ctaf-input").value = transcript;
-    submitCTAF();
-  };
+    microphoneRecorder = mimeType
+      ? new MediaRecorder(microphoneStream, {mimeType})
+      : new MediaRecorder(microphoneStream);
 
-  recognition.onerror = event => {
-    addAlert("info", "Speech error: " + event.error);
-  };
+    microphoneRecorder.ondataavailable = event => {
+      if (event.data && event.data.size > 0) {
+        microphoneChunks.push(event.data);
+      }
+    };
 
-  recognition.onend = () => {
-    isListening = false;
-    document.getElementById("mic-btn").textContent = "🎙";
-  };
+    microphoneRecorder.onstop = async () => {
+      const actualType = microphoneRecorder.mimeType || mimeType || "audio/webm";
+      const blob = new Blob(microphoneChunks, {type: actualType});
+      const extension = extensionForMimeType(actualType);
 
-  recognition.start();
+      microphoneStream?.getTracks().forEach(track => track.stop());
+      microphoneStream = null;
+      microphoneRecorder = null;
+      microphoneChunks = [];
+
+      await uploadAudioBlob(blob, `ptt-recording.${extension}`, "Push-to-talk");
+    };
+
+    microphoneRecorder.start(250);
+    pushToTalkActive = true;
+
+    const button = document.getElementById("mic-btn");
+    button.classList.add("recording");
+    button.textContent = "Recording…";
+    button.setPointerCapture?.(event.pointerId);
+
+    setAudioStatus("Push-to-talk recording. Release the button to transcribe.");
+  } catch (error) {
+    addAlert("info", `Microphone error: ${error.message}`);
+    setAudioStatus("Microphone permission was denied or unavailable.");
+    stopPushToTalk(event);
+  }
+}
+
+function stopPushToTalk(event) {
+  event?.preventDefault();
+
+  if (!pushToTalkActive) return;
+
+  pushToTalkActive = false;
+
+  const button = document.getElementById("mic-btn");
+  button.classList.remove("recording");
+  button.textContent = "Hold PTT";
+
+  if (microphoneRecorder && microphoneRecorder.state !== "inactive") {
+    microphoneRecorder.stop();
+  } else {
+    microphoneStream?.getTracks().forEach(track => track.stop());
+    microphoneStream = null;
+  }
+
+  setAudioStatus("Push-to-talk recording complete. Processing…");
+}
+
+function cancelPushToTalkIfNeeded(event) {
+  if (pushToTalkActive && event.buttons === 0) {
+    stopPushToTalk(event);
+  }
+}
+
+async function handleAudioFileSelected(event) {
+  const file = event.target.files?.[0];
+
+  if (!file) return;
+
+  await uploadAudioBlob(file, file.name, "Audio upload");
+  event.target.value = "";
+}
+
+async function toggleComputerAudio() {
+  if (computerAudioActive) {
+    stopComputerAudioCapture();
+    return;
+  }
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    addAlert("info", "Computer audio capture is not supported in this browser.");
+    return;
+  }
+
+  try {
+    displayStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true
+    });
+
+    const audioTracks = displayStream.getAudioTracks();
+
+    if (audioTracks.length === 0) {
+      displayStream.getTracks().forEach(track => track.stop());
+      displayStream = null;
+      throw new Error("No shared audio track was provided. Select a browser tab and enable Share tab audio.");
+    }
+
+    // We only need audio; stop the video track after permission is granted.
+    displayStream.getVideoTracks().forEach(track => track.stop());
+
+    const audioOnlyStream = new MediaStream(audioTracks);
+    displayChunks = [];
+    const mimeType = chooseRecorderMimeType();
+
+    displayRecorder = mimeType
+      ? new MediaRecorder(audioOnlyStream, {mimeType})
+      : new MediaRecorder(audioOnlyStream);
+
+    displayRecorder.ondataavailable = event => {
+      if (event.data && event.data.size > 0) {
+        displayChunks.push(event.data);
+      }
+    };
+
+    displayRecorder.onstop = async () => {
+      const actualType = displayRecorder.mimeType || mimeType || "audio/webm";
+      const blob = new Blob(displayChunks, {type: actualType});
+      const extension = extensionForMimeType(actualType);
+
+      displayStream?.getTracks().forEach(track => track.stop());
+      displayStream = null;
+      displayRecorder = null;
+      displayChunks = [];
+
+      await uploadAudioBlob(blob, `computer-audio.${extension}`, "Computer audio");
+    };
+
+    audioTracks[0].addEventListener("ended", () => {
+      if (computerAudioActive) stopComputerAudioCapture();
+    });
+
+    displayRecorder.start(250);
+    computerAudioActive = true;
+
+    const button = document.getElementById("computer-audio-btn");
+    button.classList.add("recording");
+    button.textContent = "Stop & Transcribe";
+
+    setAudioStatus("Capturing shared tab/computer audio. Click Stop & Transcribe when the CTAF call is finished.");
+    addAlert("info", "Computer audio capture started.");
+
+  } catch (error) {
+    addAlert("info", `Computer audio error: ${error.message}`);
+    setAudioStatus("Computer audio capture was cancelled or unavailable.");
+    stopComputerAudioCapture(false);
+  }
+}
+
+function stopComputerAudioCapture(processAudio = true) {
+  if (!computerAudioActive && !displayStream) return;
+
+  computerAudioActive = false;
+
+  const button = document.getElementById("computer-audio-btn");
+  button.classList.remove("recording");
+  button.textContent = "Capture Tab Audio";
+
+  if (displayRecorder && displayRecorder.state !== "inactive" && processAudio) {
+    displayRecorder.stop();
+    setAudioStatus("Computer audio capture complete. Processing…");
+  } else {
+    displayStream?.getTracks().forEach(track => track.stop());
+    displayStream = null;
+    displayRecorder = null;
+    displayChunks = [];
+  }
 }
 
 document.getElementById("ctaf-input").addEventListener("keydown", event => {
