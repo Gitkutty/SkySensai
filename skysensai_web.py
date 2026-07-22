@@ -33,14 +33,30 @@ def get_whisper_model():
     return whisper_model
 
 
+AVIATION_WHISPER_PROMPT = (
+    "Aviation CTAF radio calls at San Martin Airport E16. "
+    "Expected aircraft and callsigns include Cessna 3AN, Cessna 7TX, "
+    "Cessna 23A, Cherokee 56T, and Diamond 45X. "
+    "Expected phrases include San Martin traffic, runway one four, runway three two, "
+    "forty-five entry, downwind, crosswind, base, final, short final, "
+    "holding short, entering runway, departing, and clear of runway. "
+    "Spell aviation callsigns using digits and phonetic letters, for example "
+    "Cessna three alpha november means Cessna 3AN."
+)
+
+
 def transcribe_audio_file(file_path):
     model = get_whisper_model()
     segments, info = model.transcribe(
         file_path,
         language="en",
-        beam_size=5,
+        beam_size=8,
+        best_of=5,
+        temperature=0.0,
         vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 350}
+        vad_parameters={"min_silence_duration_ms": 250},
+        initial_prompt=AVIATION_WHISPER_PROMPT,
+        condition_on_previous_text=False,
     )
 
     transcript = " ".join(
@@ -61,6 +77,7 @@ active_alerts = set()
 
 ADSB_REPLAY_FILE = "sample_e16_adsb_history.csv"
 adsb_replay_rows = []
+adsb_replay_snapshots = []
 
 PATTERN_STATES = {
     "downwind", "base", "final", "short_final", "crosswind", "upwind",
@@ -77,27 +94,54 @@ CRITICAL_STATES = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 SAMPLE_ADSB_CSV = """time_sec,timestamp,callsign,icao24,runway,state,latitude,longitude,x,y,altitude_ft,groundspeed_kt,track_deg,on_ground,source
-0,2026-06-20T18:00:00Z,N56T,a1b2c3,14,downwind,37.1010,-121.5750,500,330,1200,92,140,false,simulated_adsb
-8,2026-06-20T18:00:08Z,N56T,a1b2c3,14,downwind,37.0960,-121.5780,500,330,1180,90,145,false,simulated_adsb
-16,2026-06-20T18:00:16Z,N23A,b2c3d4,14,forty_five_entry,37.1045,-121.5625,560,238,1300,95,230,false,simulated_adsb
-24,2026-06-20T18:00:24Z,N56T,a1b2c3,14,base,37.0830,-121.5850,420,625,1050,85,230,false,simulated_adsb
-32,2026-06-20T18:00:32Z,N23A,b2c3d4,14,downwind,37.0990,-121.5765,500,330,1200,91,140,false,simulated_adsb
-40,2026-06-20T18:00:40Z,N45X,c3d4e5,14,forty_five_entry,37.1050,-121.5615,560,238,1300,94,230,false,simulated_adsb
-48,2026-06-20T18:00:48Z,N56T,a1b2c3,14,final,37.0750,-121.6030,206,618,850,78,320,false,simulated_adsb
-56,2026-06-20T18:00:56Z,N23A,b2c3d4,14,base,37.0835,-121.5860,420,625,1050,84,230,false,simulated_adsb
-64,2026-06-20T18:01:04Z,N45X,c3d4e5,14,downwind,37.0980,-121.5770,500,330,1200,90,140,false,simulated_adsb
-72,2026-06-20T18:01:12Z,N56T,a1b2c3,14,short_final,37.0790,-121.5980,222,583,500,72,320,false,simulated_adsb
-80,2026-06-20T18:01:20Z,N23A,b2c3d4,14,final,37.0755,-121.6025,206,618,850,78,320,false,simulated_adsb
-88,2026-06-20T18:01:28Z,N45X,c3d4e5,14,base,37.0840,-121.5865,420,625,1050,84,230,false,simulated_adsb
-96,2026-06-20T18:01:36Z,N56T,a1b2c3,14,landed_rollout,37.0818,-121.5965,258,440,300,45,320,true,simulated_adsb
-104,2026-06-20T18:01:44Z,N23A,b2c3d4,14,short_final,37.0792,-121.5983,222,583,520,72,320,false,simulated_adsb
-112,2026-06-20T18:01:52Z,N56T,a1b2c3,14,entered_taxiway,37.0820,-121.5960,302,490,280,15,0,true,simulated_adsb
-120,2026-06-20T18:02:00Z,N45X,c3d4e5,14,final,37.0758,-121.6028,206,618,850,78,320,false,simulated_adsb
-128,2026-06-20T18:02:08Z,N23A,b2c3d4,14,landed_rollout,37.0817,-121.5967,258,440,300,45,320,true,simulated_adsb
-136,2026-06-20T18:02:16Z,N45X,c3d4e5,14,short_final,37.0791,-121.5981,222,583,520,72,320,false,simulated_adsb
-144,2026-06-20T18:02:24Z,N23A,b2c3d4,14,entered_taxiway,37.0821,-121.5961,302,490,280,15,0,true,simulated_adsb
-152,2026-06-20T18:02:32Z,N45X,c3d4e5,14,landed_rollout,37.0816,-121.5968,258,440,300,45,320,true,simulated_adsb
-160,2026-06-20T18:02:40Z,N45X,c3d4e5,14,entered_taxiway,37.0822,-121.5962,302,490,280,15,0,true,simulated_adsb
+0,2026-06-20T18:00:00Z,Cessna 23A,a1b2c3,14,downwind,,,488,185,1200,88,140,false,simulated_adsb_gradual_v2
+0,2026-06-20T18:00:00Z,Cherokee 56T,b2c3d4,14,taxiing,,,365,300,280,10,250,true,simulated_adsb_gradual_v2
+0,2026-06-20T18:00:00Z,Diamond 45X,c3d4e5,14,forty_five_entry,,,620,170,1300,92,230,false,simulated_adsb_gradual_v2
+2,2026-06-20T18:00:02Z,Cessna 23A,a1b2c3,14,downwind,,,492,245,1180,88,140,false,simulated_adsb_gradual_v2
+2,2026-06-20T18:00:02Z,Cherokee 56T,b2c3d4,14,taxiing,,,345,335,280,10,250,true,simulated_adsb_gradual_v2
+2,2026-06-20T18:00:02Z,Diamond 45X,c3d4e5,14,forty_five_entry,,,590,205,1280,92,230,false,simulated_adsb_gradual_v2
+4,2026-06-20T18:00:04Z,Cessna 23A,a1b2c3,14,downwind,,,498,315,1150,86,145,false,simulated_adsb_gradual_v2
+4,2026-06-20T18:00:04Z,Cherokee 56T,b2c3d4,14,taxiing,,,325,375,280,9,230,true,simulated_adsb_gradual_v2
+4,2026-06-20T18:00:04Z,Diamond 45X,c3d4e5,14,forty_five_entry,,,555,245,1250,91,230,false,simulated_adsb_gradual_v2
+6,2026-06-20T18:00:06Z,Cessna 23A,a1b2c3,14,downwind,,,505,410,1100,84,155,false,simulated_adsb_gradual_v2
+6,2026-06-20T18:00:06Z,Cherokee 56T,b2c3d4,14,taxiing,,,305,420,280,8,220,true,simulated_adsb_gradual_v2
+6,2026-06-20T18:00:06Z,Diamond 45X,c3d4e5,14,downwind,,,510,210,1220,90,140,false,simulated_adsb_gradual_v2
+8,2026-06-20T18:00:08Z,Cessna 23A,a1b2c3,14,base,,,500,520,1000,82,230,false,simulated_adsb_gradual_v2
+8,2026-06-20T18:00:08Z,Cherokee 56T,b2c3d4,14,holding_short,,,286,468,280,0,0,true,simulated_adsb_gradual_v2
+8,2026-06-20T18:00:08Z,Diamond 45X,c3d4e5,14,downwind,,,512,270,1200,89,140,false,simulated_adsb_gradual_v2
+10,2026-06-20T18:00:10Z,Cessna 23A,a1b2c3,14,base,,,430,570,930,80,250,false,simulated_adsb_gradual_v2
+10,2026-06-20T18:00:10Z,Cherokee 56T,b2c3d4,14,holding_short,,,276,492,280,0,0,true,simulated_adsb_gradual_v2
+10,2026-06-20T18:00:10Z,Diamond 45X,c3d4e5,14,downwind,,,516,335,1180,88,140,false,simulated_adsb_gradual_v2
+12,2026-06-20T18:00:12Z,Cessna 23A,a1b2c3,14,base,,,330,610,870,78,280,false,simulated_adsb_gradual_v2
+12,2026-06-20T18:00:12Z,Cherokee 56T,b2c3d4,14,holding_short,,,270,505,280,0,0,true,simulated_adsb_gradual_v2
+12,2026-06-20T18:00:12Z,Diamond 45X,c3d4e5,14,downwind,,,520,405,1140,86,150,false,simulated_adsb_gradual_v2
+14,2026-06-20T18:00:14Z,Cessna 23A,a1b2c3,14,final,,,245,630,800,76,320,false,simulated_adsb_gradual_v2
+14,2026-06-20T18:00:14Z,Cherokee 56T,b2c3d4,14,holding_short,,,268,508,280,0,0,true,simulated_adsb_gradual_v2
+14,2026-06-20T18:00:14Z,Diamond 45X,c3d4e5,14,downwind,,,524,485,1080,84,165,false,simulated_adsb_gradual_v2
+16,2026-06-20T18:00:16Z,Cessna 23A,a1b2c3,14,final,,,225,610,650,74,320,false,simulated_adsb_gradual_v2
+16,2026-06-20T18:00:16Z,Cherokee 56T,b2c3d4,14,holding_short,,,268,508,280,0,0,true,simulated_adsb_gradual_v2
+16,2026-06-20T18:00:16Z,Diamond 45X,c3d4e5,14,base,,,500,545,1000,82,230,false,simulated_adsb_gradual_v2
+18,2026-06-20T18:00:18Z,Cessna 23A,a1b2c3,14,short_final,,,218,575,480,70,320,false,simulated_adsb_gradual_v2
+18,2026-06-20T18:00:18Z,Cherokee 56T,b2c3d4,14,entering_runway,,,255,516,280,8,320,true,simulated_adsb_gradual_v2
+18,2026-06-20T18:00:18Z,Diamond 45X,c3d4e5,14,base,,,450,575,950,80,245,false,simulated_adsb_gradual_v2
+20,2026-06-20T18:00:20Z,Cessna 23A,a1b2c3,14,short_final,,,222,548,380,68,320,false,simulated_adsb_gradual_v2
+20,2026-06-20T18:00:20Z,Cherokee 56T,b2c3d4,14,entering_runway,,,248,500,280,12,320,true,simulated_adsb_gradual_v2
+20,2026-06-20T18:00:20Z,Diamond 45X,c3d4e5,14,base,,,395,600,900,78,270,false,simulated_adsb_gradual_v2
+22,2026-06-20T18:00:22Z,Cessna 23A,a1b2c3,14,upwind,,,210,500,520,76,140,false,simulated_adsb_gradual_v2
+22,2026-06-20T18:00:22Z,Cherokee 56T,b2c3d4,14,entering_runway,,,252,465,280,14,320,true,simulated_adsb_gradual_v2
+22,2026-06-20T18:00:22Z,Diamond 45X,c3d4e5,14,base,,,335,615,850,77,290,false,simulated_adsb_gradual_v2
+24,2026-06-20T18:00:24Z,Cessna 23A,a1b2c3,14,upwind,,,202,420,700,82,140,false,simulated_adsb_gradual_v2
+24,2026-06-20T18:00:24Z,Cherokee 56T,b2c3d4,14,clear_of_runway,,,286,440,280,10,60,true,simulated_adsb_gradual_v2
+24,2026-06-20T18:00:24Z,Diamond 45X,c3d4e5,14,final,,,270,628,800,76,320,false,simulated_adsb_gradual_v2
+26,2026-06-20T18:00:26Z,Cessna 23A,a1b2c3,14,upwind,,,194,335,900,86,140,false,simulated_adsb_gradual_v2
+26,2026-06-20T18:00:26Z,Cherokee 56T,b2c3d4,14,clear_of_runway,,,302,420,280,8,60,true,simulated_adsb_gradual_v2
+26,2026-06-20T18:00:26Z,Diamond 45X,c3d4e5,14,final,,,242,616,700,74,320,false,simulated_adsb_gradual_v2
+28,2026-06-20T18:00:28Z,Cessna 23A,a1b2c3,14,crosswind,,,250,195,1050,88,50,false,simulated_adsb_gradual_v2
+28,2026-06-20T18:00:28Z,Cherokee 56T,b2c3d4,14,taxiing,,,322,390,280,8,60,true,simulated_adsb_gradual_v2
+28,2026-06-20T18:00:28Z,Diamond 45X,c3d4e5,14,final,,,228,595,590,72,320,false,simulated_adsb_gradual_v2
+30,2026-06-20T18:00:30Z,Cessna 23A,a1b2c3,14,crosswind,,,340,120,1150,90,50,false,simulated_adsb_gradual_v2
+30,2026-06-20T18:00:30Z,Cherokee 56T,b2c3d4,14,taxiing,,,345,360,280,8,60,true,simulated_adsb_gradual_v2
+30,2026-06-20T18:00:30Z,Diamond 45X,c3d4e5,14,short_final,,,220,565,470,70,320,false,simulated_adsb_gradual_v2
 """
 
 
@@ -744,141 +788,213 @@ def normalize_csv_row(row):
     }
 
 
+def _time_sort_key(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def build_adsb_snapshots(rows):
+    """Group every row sharing time_sec into one simultaneous traffic snapshot."""
+    grouped = {}
+
+    for row in rows:
+        time_sec = (row.get("time_sec") or row.get("timestamp") or "0").strip()
+        grouped.setdefault(time_sec, []).append(row)
+
+    return [
+        {"time_sec": time_sec, "updates": grouped[time_sec]}
+        for time_sec in sorted(grouped, key=_time_sort_key)
+    ]
+
+
 def load_adsb_replay_file():
-    global adsb_replay_rows
+    global adsb_replay_rows, adsb_replay_snapshots
 
     adsb_replay_rows = []
+    adsb_replay_snapshots = []
     note = ""
-
     hidden_txt_name = ADSB_REPLAY_FILE + ".txt"
 
     if not os.path.exists(ADSB_REPLAY_FILE) and os.path.exists(hidden_txt_name):
-        return False, f"Found {hidden_txt_name}, but the app needs {ADSB_REPLAY_FILE}. Rename it exactly to {ADSB_REPLAY_FILE}."
+        return False, (
+            f"Found {hidden_txt_name}, but the app needs {ADSB_REPLAY_FILE}. "
+            f"Rename it exactly to {ADSB_REPLAY_FILE}."
+        )
 
     if not os.path.exists(ADSB_REPLAY_FILE):
         create_sample_adsb_file()
-        note = f"{ADSB_REPLAY_FILE} was missing, so SkySensAI created a sample ADS-B file automatically."
+        note = f"{ADSB_REPLAY_FILE} was missing, so SkySensAI created the runway-incursion sample."
 
     if os.path.getsize(ADSB_REPLAY_FILE) == 0:
         create_sample_adsb_file()
-        note = f"{ADSB_REPLAY_FILE} was empty, so SkySensAI replaced it with sample ADS-B data."
+        note = f"{ADSB_REPLAY_FILE} was empty, so SkySensAI created the runway-incursion sample."
 
-    with open(ADSB_REPLAY_FILE, newline="", encoding="utf-8-sig") as file:
-        reader = csv.DictReader(file)
-
-        for raw_row in reader:
-            row = normalize_csv_row(raw_row)
-            callsign = row.get("callsign") or row.get("flight")
-            state = row.get("state")
-
-            if not callsign or not state:
-                continue
-
-            adsb_replay_rows.append(row)
-
-    if len(adsb_replay_rows) == 0:
-        create_sample_adsb_file()
-
+    def read_rows():
+        loaded_rows = []
         with open(ADSB_REPLAY_FILE, newline="", encoding="utf-8-sig") as file:
             reader = csv.DictReader(file)
-
             for raw_row in reader:
                 row = normalize_csv_row(raw_row)
                 callsign = row.get("callsign") or row.get("flight")
                 state = row.get("state")
-
                 if callsign and state:
-                    adsb_replay_rows.append(row)
+                    loaded_rows.append(row)
+        return loaded_rows
 
-        note = f"{ADSB_REPLAY_FILE} had no usable data rows, so SkySensAI replaced it with sample ADS-B data."
+    adsb_replay_rows = read_rows()
 
-    if len(adsb_replay_rows) == 0:
+    if not adsb_replay_rows:
+        create_sample_adsb_file()
+        adsb_replay_rows = read_rows()
+        note = f"{ADSB_REPLAY_FILE} had no usable rows, so SkySensAI restored the runway-incursion sample."
+
+    if not adsb_replay_rows:
         return False, "ADS-B file still has zero usable rows. Check the CSV header and data."
 
-    print(f"Loaded {len(adsb_replay_rows)} ADS-B rows from {ADSB_REPLAY_FILE}")
-    return True, note or f"Loaded {len(adsb_replay_rows)} ADS-B rows from {ADSB_REPLAY_FILE}."
+    # Upgrade the older one-aircraft-per-timestamp sample automatically, but
+    # never overwrite a real/custom file containing multiple live snapshots.
+    counts = {}
+    for row in adsb_replay_rows:
+        key = (row.get("time_sec") or row.get("timestamp") or "0").strip()
+        counts[key] = counts.get(key, 0) + 1
+
+    sources = {(row.get("source") or "").lower() for row in adsb_replay_rows}
+    is_bundled_simulation = bool(sources) and all(
+        source.startswith("simulated_adsb") for source in sources
+    )
+    is_current_gradual_sample = sources == {"simulated_adsb_gradual_v2"}
+
+    # Upgrade any older bundled SkySensAI sample, while leaving custom or real
+    # ADS-B files untouched.
+    if is_bundled_simulation and not is_current_gradual_sample:
+        create_sample_adsb_file()
+        adsb_replay_rows = read_rows()
+        note = (
+            "The older ADS-B sample was replaced with the gradual, simultaneous "
+            "three-aircraft runway-incursion scenario."
+        )
+
+    adsb_replay_snapshots = build_adsb_snapshots(adsb_replay_rows)
+
+    print(
+        f"Loaded {len(adsb_replay_rows)} ADS-B rows as "
+        f"{len(adsb_replay_snapshots)} simultaneous snapshots."
+    )
+
+    return True, note or (
+        f"Loaded {len(adsb_replay_rows)} ADS-B rows as "
+        f"{len(adsb_replay_snapshots)} simultaneous snapshots."
+    )
 
 
-def find_next_adsb_update(step_index, callsign, current_state, current_runway):
-    """Look ahead to this callsign's next changed ADS-B state/position."""
-    for future_row in adsb_replay_rows[step_index + 1:]:
-        future_callsign = (future_row.get("callsign") or future_row.get("flight") or "").strip()
+def find_next_adsb_update(snapshot_index, callsign, current_state, current_runway):
+    """Find this aircraft's next update in a later simultaneous snapshot."""
+    for future_snapshot in adsb_replay_snapshots[snapshot_index + 1:]:
+        for future_row in future_snapshot["updates"]:
+            future_callsign = (
+                future_row.get("callsign") or future_row.get("flight") or ""
+            ).strip()
 
-        if future_callsign != callsign:
-            continue
+            if future_callsign != callsign:
+                continue
 
-        future_state = (future_row.get("state") or current_state).strip()
-        future_runway = (future_row.get("runway") or current_runway).strip()
-        future_x = safe_float(future_row.get("x"))
-        future_y = safe_float(future_row.get("y"))
-
-        if future_state != current_state or future_runway != current_runway:
+            future_state = (future_row.get("state") or current_state).strip()
+            future_runway = (future_row.get("runway") or current_runway).strip()
+            future_x = safe_float(future_row.get("x"))
+            future_y = safe_float(future_row.get("y"))
             return future_state, future_runway, future_x, future_y
 
     return get_default_next_state(current_state), current_runway, None, None
 
 
 def process_adsb_replay_step(step_index):
-    if not adsb_replay_rows:
+    if not adsb_replay_snapshots:
         loaded, note = load_adsb_replay_file()
-
         if not loaded:
             return {
                 "error": note,
                 "aircraft": get_all_aircraft(),
                 "conflicts": []
             }
-
     else:
         note = ""
 
-    if step_index >= len(adsb_replay_rows):
+    if step_index >= len(adsb_replay_snapshots):
         return {
             "done": True,
-            "message": "ADS-B replay complete.",
+            "message": "ADS-B runway-incursion replay complete.",
             "aircraft": get_all_aircraft(),
             "conflicts": []
         }
 
-    row = adsb_replay_rows[step_index]
+    snapshot = adsb_replay_snapshots[step_index]
+    ctaf_calls = []
+    callsigns = []
 
-    callsign = (row.get("callsign") or row.get("flight") or "UNKNOWN").strip()
-    runway = (row.get("runway") or "14").strip()
-    state = (row.get("state") or "unknown").strip()
+    # Apply all aircraft updates first. This makes the traffic picture move as
+    # one real-time snapshot rather than one aircraft row at a time.
+    for row in snapshot["updates"]:
+        callsign = (row.get("callsign") or row.get("flight") or "UNKNOWN").strip()
+        runway = (row.get("runway") or "14").strip()
+        state = (row.get("state") or "unknown").strip()
+        x = safe_float(row.get("x"))
+        y = safe_float(row.get("y"))
 
-    x = safe_float(row.get("x"))
-    y = safe_float(row.get("y"))
-    next_state, next_runway, next_x, next_y = find_next_adsb_update(
-        step_index, callsign, state, runway
-    )
+        next_state, next_runway, next_x, next_y = find_next_adsb_update(
+            step_index, callsign, state, runway
+        )
 
-    set_aircraft_without_check(
-        callsign=callsign,
-        state=state,
-        runway=runway,
-        source="adsb_replay",
-        x=x,
-        y=y,
-        next_state=next_state,
-        next_runway=next_runway,
-        next_x=next_x,
-        next_y=next_y,
-    )
+        previous = aircraft.get(callsign, {})
+        previous_state = previous.get("state")
+        previous_runway = previous.get("runway")
+
+        set_aircraft_without_check(
+            callsign=callsign,
+            state=state,
+            runway=runway,
+            source="adsb_replay",
+            x=x,
+            y=y,
+            next_state=next_state,
+            next_runway=next_runway,
+            next_x=next_x,
+            next_y=next_y,
+        )
+
+        # ADS-B points arrive frequently. Speak a pilot call only when the
+        # aircraft changes leg/runway, while still animating every position.
+        if previous_state is None or state != previous_state or runway != previous_runway:
+            callsigns.append(callsign)
+            ctaf_calls.append(make_ctaf_call(callsign, state, runway))
+
+    # Check conflicts only after the entire timestamp has been applied.
+    conflicts = check_conflicts()
+    time_sec = snapshot["time_sec"]
+
+    next_interval_ms = 2000
+    if step_index + 1 < len(adsb_replay_snapshots):
+        try:
+            current_time = float(time_sec)
+            next_time = float(adsb_replay_snapshots[step_index + 1]["time_sec"])
+            next_interval_ms = max(500, int((next_time - current_time) * 1000))
+        except (TypeError, ValueError):
+            pass
 
     result = {
-        "callsign": callsign,
-        "state": state,
-        "runway": runway,
-        "conflicts": check_conflicts(),
+        "done": False,
+        "step": step_index,
+        "time_sec": time_sec,
+        "next_interval_ms": next_interval_ms,
+        "message": (
+            f"ADS-B T+{time_sec}: updated {len(snapshot['updates'])} aircraft simultaneously."
+        ),
+        "ctaf_calls": ctaf_calls,
+        "callsigns": callsigns,
+        "conflicts": conflicts,
         "aircraft": get_all_aircraft(),
     }
-
-    ctaf_call = make_ctaf_call(callsign, state, runway)
-
-    result["done"] = False
-    result["step"] = step_index
-    result["ctaf_call"] = ctaf_call
-    result["message"] = f"ADS-B REPLAY CTAF: {ctaf_call}"
 
     if step_index == 0 and note:
         result["load_note"] = note
@@ -961,6 +1077,55 @@ def normalize_spoken(text):
 def _compact_callsign_id(raw):
     """Keep only letters and digits from a possible callsign."""
     return re.sub(r"[^A-Za-z0-9]", "", raw or "").upper()
+
+
+def repair_whisper_ctaf_transcript(text):
+    """Repair common Whisper mistakes in short aviation CTAF recordings.
+
+    The raw transcript is still returned to the browser for transparency. This
+    repaired copy is used only by the CTAF parser.
+    """
+    repaired = str(text or "").strip()
+
+    # Common vocabulary errors seen in the uploaded recordings.
+    replacements = [
+        (r"\bbass\b", "base"),
+        (r"\bbased\b", "base"),
+        (r"\brenway\b", "runway"),
+        (r"\brenways\b", "runways"),
+        (r"\brun way\b", "runway"),
+        (r"\b1\s*[-–—]\s*4\b", "one four"),
+        (r"\b3\s*[-–—]\s*2\b", "three two"),
+    ]
+
+    for pattern, replacement in replacements:
+        repaired = re.sub(pattern, replacement, repaired, flags=re.IGNORECASE)
+
+    # Whisper frequently converts "three alpha november" into an ordinal/date
+    # phrase such as "third of November" or "3th of November".
+    repaired = re.sub(
+        r"\bcessna\s*,?\s*(?:three|3)(?:rd|th)?\s+(?:alpha\s+)?of\s+november\b",
+        "Cessna three alpha november",
+        repaired,
+        flags=re.IGNORECASE,
+    )
+    repaired = re.sub(
+        r"\bcessna\s*,?\s*third\s+of\s+november\b",
+        "Cessna three alpha november",
+        repaired,
+        flags=re.IGNORECASE,
+    )
+
+    # Handle punctuation inserted between aircraft type and identifier.
+    repaired = re.sub(
+        r"\b(cessna|cherokee|diamond|piper|skyhawk|skylane)\s*,\s*",
+        r"\1 ",
+        repaired,
+        flags=re.IGNORECASE,
+    )
+
+    repaired = re.sub(r"\s+", " ", repaired).strip()
+    return repaired
 
 
 def extract_callsign(text):
@@ -1084,12 +1249,14 @@ def extract_state(text):
 
 
 def process_ctaf(text):
-    callsign = extract_callsign(text)
-    runway = extract_runway(text)
-    state = extract_state(text)
+    parser_text = repair_whisper_ctaf_transcript(text)
+    callsign = extract_callsign(parser_text)
+    runway = extract_runway(parser_text)
+    state = extract_state(parser_text)
 
     diagnostics = {
         "text": text,
+        "parser_text": parser_text,
         "detected_callsign": callsign,
         "detected_runway": runway,
         "detected_state": state,
@@ -1201,8 +1368,9 @@ def api_audio_transcribe():
 
         result = process_ctaf(transcript)
 
-        # Always return the exact Whisper transcript and parser diagnostics.
+        # Always return the exact Whisper transcript and the repaired parser text.
         result["transcript"] = transcript
+        result["normalized_transcript"] = result.get("parser_text", transcript)
         result["language_probability"] = language_probability
         result["audio_filename"] = audio.filename
 
@@ -1467,6 +1635,12 @@ select {
 }
 
 .alert-item.ctaf {
+  border-left-color: var(--accent2);
+  color: #b8ffe4;
+  background: rgba(0,255,163,0.05);
+}
+
+.alert-item.transcript {
   border-left-color: var(--accent2);
   color: #b8ffe4;
   background: rgba(0,255,163,0.05);
@@ -1822,8 +1996,11 @@ td {
           <text x="50" y="91" fill="var(--muted)" font-size="8" font-family="monospace" text-anchor="middle">S</text>
           <text x="13" y="53" fill="var(--muted)" font-size="8" font-family="monospace" text-anchor="middle">W</text>
 
-          <text x="79" y="88" fill="var(--accent2)" font-size="8" font-family="monospace" text-anchor="middle">14</text>
-          <text x="21" y="14" fill="var(--accent2)" font-size="8" font-family="monospace" text-anchor="middle">32</text>
+          <!-- Runway numbers are placed at the approach end of each runway. -->
+          <!-- Facing RWY 32 means traveling northwest on approximately 320°. -->
+          <!-- Facing RWY 14 means traveling southeast on approximately 140°. -->
+          <text x="79" y="88" fill="var(--accent2)" font-size="8" font-family="monospace" text-anchor="middle">32</text>
+          <text x="21" y="14" fill="var(--accent2)" font-size="8" font-family="monospace" text-anchor="middle">14</text>
         </svg>
         <div class="compass-caption">RWY 14/32 · 140°/320°</div>
       </div>
@@ -1907,8 +2084,8 @@ let simStepIndex = 0;
 let adsbReplayRunning = false;
 let adsbStepIndex = 0;
 
-const SIM_ANIMATION_MS = 7600;
-const POST_STEP_BUFFER_MS = 1400;
+const SIM_ANIMATION_MS = 1800;
+const POST_STEP_BUFFER_MS = 150;
 const MIN_STEP_MS = SIM_ANIMATION_MS + POST_STEP_BUFFER_MS;
 
 const recentAlertTimes = new Map();
@@ -2079,16 +2256,25 @@ function getPilotVoiceProfile(callsign) {
 
   const pool = malePilotAccentPool.length ? malePilotAccentPool : [{ voice: null, accent: "V1" }];
   const hash = hashString(key);
-  const isCessna23A = key.toUpperCase() === "CESSNA 23A";
 
-  // Cessna 23A is explicitly pinned to the first known male voice. Every
-  // other pilot also comes only from the male pool, with deterministic
-  // variation so the scenario pilots remain easy to distinguish.
-  const entry = pool[isCessna23A ? 0 : hash % pool.length];
-  const pitch = isCessna23A
-    ? 0.78
-    : 0.80 + (((hash % 17) - 8) / 100);                  // roughly 0.72 – 0.88
-  const rate = 0.90 + (Math.floor(hash / 31) % 16) / 100;  // roughly 0.90 – 1.05
+  // Explicitly separate the three demonstration pilots. When the browser has
+  // several male voices they receive different voices/accents. When it only
+  // has one, the clearly separated pitch and rate still make them distinct.
+  const demoProfiles = {
+    "CESSNA 23A":   { poolIndex: 0, pitch: 0.74, rate: 0.90 },
+    "CHEROKEE 56T": { poolIndex: 1, pitch: 0.88, rate: 1.02 },
+    "DIAMOND 45X":  { poolIndex: 2, pitch: 0.80, rate: 0.96 }
+  };
+
+  const configured = demoProfiles[key.toUpperCase()];
+  const poolIndex = configured ? configured.poolIndex % pool.length : hash % pool.length;
+  const entry = pool[poolIndex];
+  const pitch = configured
+    ? configured.pitch
+    : 0.78 + (((hash % 19) - 9) / 100);
+  const rate = configured
+    ? configured.rate
+    : 0.91 + (Math.floor(hash / 31) % 14) / 100;
 
   const profile = { voice: entry.voice, accent: entry.accent, pitch, rate };
   pilotVoiceProfiles.set(key, profile);
@@ -2173,7 +2359,7 @@ function animateDotTo(dot, targetX, targetY, targetHeading, duration = SIM_ANIMA
   dot.animFrame = requestAnimationFrame(step);
 }
 
-function updateMapDots(aircraftList) {
+function updateMapDots(aircraftList, animationMs = SIM_ANIMATION_MS) {
   const layer = document.getElementById("aircraft-layer");
   const seen = new Set();
 
@@ -2257,7 +2443,7 @@ function updateMapDots(aircraftList) {
     dot.text.textContent = ac.callsign;
     dot.pulse.setAttribute("stroke", color);
 
-    animateDotTo(dot, pos.x, pos.y, heading, SIM_ANIMATION_MS);
+    animateDotTo(dot, pos.x, pos.y, heading, animationMs);
   }
 
   for (const callsign of Object.keys(acDots)) {
@@ -2406,6 +2592,7 @@ async function resetAll() {
     window.speechSynthesis.cancel();
   }
 
+  stopUploadedAudioPlayback();
   speechQueue = Promise.resolve();
   recentAlertTimes.clear();
 
@@ -2422,7 +2609,7 @@ async function resetAll() {
   addAlert("info", "All aircraft cleared. Monitoring CTAF.");
 }
 
-async function handleReplayData(data, label) {
+async function handleReplayData(data, label, stepDurationMs = MIN_STEP_MS) {
   if (data.error) {
     await addAlert("info", `${label} error: ${data.error}`);
     return false;
@@ -2451,7 +2638,7 @@ async function handleReplayData(data, label) {
     speechPromises.push(addAlert("ctaf", data.message, data.callsign || null));
   }
 
-  updateMapDots(data.aircraft || []);
+  updateMapDots(data.aircraft || [], Math.max(350, stepDurationMs - 150));
   updateAcTable(data.aircraft || []);
 
   for (const conflict of data.conflicts || []) {
@@ -2460,7 +2647,7 @@ async function handleReplayData(data, label) {
 
   await Promise.all([
     Promise.all(speechPromises),
-    sleep(MIN_STEP_MS)
+    sleep(stepDurationMs)
   ]);
 
   return true;
@@ -2549,7 +2736,8 @@ async function stepAdsbReplay() {
     });
 
     const data = await resp.json();
-    const keepGoing = await handleReplayData(data, "ADS-B replay");
+    const replayStepMs = Number(data.next_interval_ms) || 2000;
+    const keepGoing = await handleReplayData(data, "ADS-B replay", replayStepMs);
 
     if (keepGoing) {
       adsbStepIndex += 1;
@@ -2651,6 +2839,77 @@ function extensionForMimeType(mimeType) {
   return "webm";
 }
 
+let activePlaybackAudio = null;
+let activePlaybackUrl = null;
+
+function stopUploadedAudioPlayback() {
+  if (activePlaybackAudio) {
+    try {
+      activePlaybackAudio.pause();
+      activePlaybackAudio.currentTime = 0;
+    } catch (error) {
+      // Nothing else is needed if playback was already stopped.
+    }
+    activePlaybackAudio = null;
+  }
+
+  if (activePlaybackUrl) {
+    URL.revokeObjectURL(activePlaybackUrl);
+    activePlaybackUrl = null;
+  }
+}
+
+async function playUploadedAudioBlob(blob, sourceLabel) {
+  stopUploadedAudioPlayback();
+
+  activePlaybackUrl = URL.createObjectURL(blob);
+  activePlaybackAudio = new Audio(activePlaybackUrl);
+  activePlaybackAudio.preload = "auto";
+  activePlaybackAudio.volume = 1.0;
+
+  setAudioStatus(`${sourceLabel}: transcription complete. Playing original audio…`);
+  addAlert("info", `${sourceLabel}: playing original audio recording.`);
+
+  return new Promise(resolve => {
+    let finished = false;
+
+    function finishPlayback(message = null) {
+      if (finished) return;
+      finished = true;
+
+      if (message) {
+        addAlert("info", message);
+      }
+
+      if (activePlaybackUrl) {
+        URL.revokeObjectURL(activePlaybackUrl);
+      }
+
+      activePlaybackAudio = null;
+      activePlaybackUrl = null;
+      resolve();
+    }
+
+    activePlaybackAudio.onended = () => {
+      finishPlayback();
+    };
+
+    activePlaybackAudio.onerror = () => {
+      finishPlayback(`${sourceLabel}: the browser could not play the original audio.`);
+    };
+
+    const playPromise = activePlaybackAudio.play();
+
+    if (playPromise && typeof playPromise.catch === "function") {
+      playPromise.catch(error => {
+        finishPlayback(
+          `${sourceLabel}: automatic playback was blocked by the browser (${error.message}).`
+        );
+      });
+    }
+  });
+}
+
 async function uploadAudioBlob(blob, filename, sourceLabel) {
   if (!blob || blob.size === 0) {
     addAlert("info", "No audio was captured.");
@@ -2678,11 +2937,22 @@ async function uploadAudioBlob(blob, filename, sourceLabel) {
       throw new Error(`Server returned ${response.status} without valid JSON.`);
     }
 
-    // Always show exactly what Whisper heard, even if CTAF parsing fails.
+    // Show exactly what Whisper heard without speaking it back through TTS.
     if (data.transcript) {
       const input = document.getElementById("ctaf-input");
-      input.value = data.transcript;
-      addAlert("ctaf", `WHISPER TRANSCRIPT: ${data.transcript}`, data.callsign || null);
+      input.value = data.normalized_transcript || data.transcript;
+      addAlert("transcript", `WHISPER TRANSCRIPT: ${data.transcript}`, data.callsign || null);
+
+      if (
+        data.normalized_transcript &&
+        data.normalized_transcript.trim().toLowerCase() !== data.transcript.trim().toLowerCase()
+      ) {
+        addAlert("info", `PARSER CORRECTION: ${data.normalized_transcript}`);
+      }
+
+      // Play the user's real recording after transcription. Because this is
+      // awaited, any SkySensAI advisory voice waits until playback has ended.
+      await playUploadedAudioBlob(blob, sourceLabel);
     }
 
     if (!response.ok || data.error) {
@@ -2717,7 +2987,7 @@ async function uploadAudioBlob(blob, filename, sourceLabel) {
       return;
     }
 
-    setAudioStatus(`${sourceLabel}: transcript recognized and traffic updated.`);
+    setAudioStatus(`${sourceLabel}: audio played and traffic updated.`);
 
     addAlert(
       "info",
@@ -2728,8 +2998,9 @@ async function uploadAudioBlob(blob, filename, sourceLabel) {
     updateMapDots(data.aircraft || []);
     updateAcTable(data.aircraft || []);
 
+    // Speak advisories one at a time only after the uploaded recording ends.
     for (const conflict of data.conflicts || []) {
-      addAlert(conflict.type, conflict.message);
+      await addAlert(conflict.type, conflict.message);
     }
 
   } catch (error) {
