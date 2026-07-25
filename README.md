@@ -1,13 +1,14 @@
 # SkySensAI
 
 **An AI-enabled traffic advisory and sequencing system for nontowered airports**
+<img width="313" height="209" alt="SkySensAI-2" src="https://github.com/user-attachments/assets/e43ad80d-805a-4f56-b841-5e5c0a4e4ceb" />
 
 SkySensAI is a prototype decision-support system designed to improve situational awareness, traffic sequencing, and runway safety at nontowered airports.
 
 The system listens to pilot self-announcements on the Common Traffic Advisory Frequency (CTAF), converts the transmissions into structured aircraft information, tracks each aircraft through the airport traffic pattern, detects potential conflicts, and generates advisory messages for pilots.
 
 The initial case study focuses on **San Martin Airport (E16)** in San Martin, California.
-<img width="313" height="209" alt="SkySensAI-2" src="https://github.com/user-attachments/assets/e43ad80d-805a-4f56-b841-5e5c0a4e4ceb" />
+
 
 ---
 
