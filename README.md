@@ -1,6 +1,6 @@
 # SkySensAI
-
 **An AI-enabled traffic advisory and sequencing system for nontowered airports**
+
 <img width="313" height="209" alt="SkySensAI-2" src="https://github.com/user-attachments/assets/e43ad80d-805a-4f56-b841-5e5c0a4e4ceb" />
 
 SkySensAI is a prototype decision-support system designed to improve situational awareness, traffic sequencing, and runway safety at nontowered airports.
