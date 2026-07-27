@@ -598,9 +598,6 @@ SkySensAI was developed as part of the **NASA Ames Aviation Systems Division Con
 ### Project Team
 
 * Rishi Kutty
-* [Team Member Name]
-* [Team Member Name]
-* [Team Member Name]
 
 ### Mentors
 
